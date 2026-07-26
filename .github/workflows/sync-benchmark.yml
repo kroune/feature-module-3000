@@ -19,9 +19,10 @@ on:
         description: "Android Studio linux.tar.gz URL (from jb.gg/android-studio-releases-list.json)"
         default: "https://edgedl.me.gvt1.com/android/studio/ide-zips/2026.1.2.10/android-studio-quail2-linux.tar.gz"
         type: string
-
-env:
-  GRADLE_PROFILER_VERSION: "0.25.2"
+      gradle_profiler_url:
+        description: "gradle-profiler dist zip URL (patched build from the build-profiler workflow; upstream 0.25.2 times out waiting for the IDE plugin)"
+        default: "https://github.com/kroune/feature-module-3000/releases/download/patched-profiler/gradle-profiler-0.25.2.zip"
+        type: string
 
 jobs:
   sync:
@@ -86,10 +87,12 @@ jobs:
 
       - name: Install gradle-profiler
         run: |
-          curl -sL -o gp.zip "https://github.com/gradle/gradle-profiler/releases/download/v${GRADLE_PROFILER_VERSION}/gradle-profiler-${GRADLE_PROFILER_VERSION}.zip"
-          unzip -q gp.zip -d "$RUNNER_TEMP" && rm gp.zip
-          echo "$RUNNER_TEMP/gradle-profiler-${GRADLE_PROFILER_VERSION}/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/gradle-profiler-${GRADLE_PROFILER_VERSION}/bin/gradle-profiler" --version
+          curl -sL -o gp.zip "${{ inputs.gradle_profiler_url }}"
+          mkdir -p "$RUNNER_TEMP/gp" && unzip -q gp.zip -d "$RUNNER_TEMP/gp" && rm gp.zip
+          GP_BIN=$(find "$RUNNER_TEMP/gp" -type f -name gradle-profiler -path "*/bin/*" | head -1)
+          echo "Found profiler at $GP_BIN"
+          echo "$(dirname "$GP_BIN")" >> "$GITHUB_PATH"
+          "$GP_BIN" --version
 
       - name: Install Android Studio
         run: |
@@ -185,7 +188,8 @@ jobs:
             echo
             echo "- Gradle distribution: \`${{ inputs.gradle_distribution_url }}\`"
             echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`)"
-            echo "- Android Studio: \`${{ inputs.studio_url }}\`, gradle-profiler: \`$GRADLE_PROFILER_VERSION\`"
+            echo "- Android Studio: \`${{ inputs.studio_url }}\`"
+            echo "- gradle-profiler: \`${{ inputs.gradle_profiler_url }}\`"
             echo "- gradle-profiler exit code: \`${{ steps.bench.outputs.rc }}\`"
             echo
             echo '```'
