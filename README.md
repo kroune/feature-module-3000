@@ -25,7 +25,9 @@ The job runs one cold Android Studio sync via gradle-profiler (`--single-shot`) 
 
 - **A `run-N` release per run** (permanent, fast public download URLs — this is the
   primary channel): `daemon.hprof.gz` (the Gradle daemon heap dump, the point of the
-  repro), `profiler.log`, benchmark CSV/HTML, the Studio `idea.log`, and the exact
+  repro — split into `daemon.hprof.gz.part-*` when it exceeds the 2 GiB asset limit;
+  `cat daemon.hprof.gz.part-* > daemon.hprof.gz` to reassemble), `profiler.log`,
+  benchmark CSV/HTML, the Studio `idea.log`, and the exact
   `gradle.properties` / wrapper properties / scenario file used. The release title and
   notes carry the Gradle version, heap settings and outcome.
 - **A `sync-benchmark-dumps` Actions artifact** (kept 7 days): everything above plus the

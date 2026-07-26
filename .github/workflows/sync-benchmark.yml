@@ -224,8 +224,25 @@ jobs:
           dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
           assets=()
           if [ -n "$dump" ]; then
-            cp "$dump" daemon.hprof.gz && assets+=(daemon.hprof.gz)
-            outcome="OOM reproduced ($(stat -c%s "$dump") bytes gzipped)"
+            cp "$dump" daemon.hprof.gz
+            size=$(stat -c%s daemon.hprof.gz)
+            outcome="OOM reproduced ($size bytes gzipped)"
+            # GitHub release assets are capped at 2 GiB — split larger dumps.
+            if [ "$size" -gt 2000000000 ]; then
+              split -b 1900m daemon.hprof.gz daemon.hprof.gz.part-
+              rm daemon.hprof.gz
+              assets+=(daemon.hprof.gz.part-*)
+              outcome="$outcome, split into $(ls daemon.hprof.gz.part-* | wc -l) parts"
+              {
+                echo
+                echo "**Note:** \`daemon.hprof.gz\` exceeds the 2 GiB release-asset limit and is split into parts. Reassemble with:"
+                echo '```'
+                echo "cat daemon.hprof.gz.part-* > daemon.hprof.gz"
+                echo '```'
+              } >> summary.md
+            else
+              assets+=(daemon.hprof.gz)
+            fi
           elif [ "${{ steps.bench.outputs.rc }}" = "0" ]; then
             outcome="sync completed, no OOM"
           else
