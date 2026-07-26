@@ -27,8 +27,6 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 300
-    env:
-      GRADLE_USER_HOME: ${{ runner.temp }}/guh
     steps:
       - uses: actions/checkout@v4
 
@@ -104,6 +102,8 @@ jobs:
 
       - name: Run Android Studio sync via gradle-profiler
         id: bench
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/guh
         run: |
           if ! command -v xvfb-run >/dev/null; then sudo apt-get update && sudo apt-get install -y xvfb; fi
           sed "s|@HEAP_DUMP_DIR@|$GITHUB_WORKSPACE/heap-dumps|" sync.scenarios > sync.scenarios.ci
@@ -149,6 +149,8 @@ jobs:
 
       - name: Job summary
         if: always()
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/guh
         run: |
           {
             echo "## Android Studio sync benchmark"
