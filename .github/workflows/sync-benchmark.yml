@@ -114,6 +114,7 @@ jobs:
           # call never returns). Run it in the background and watch for the dump instead:
           # once a size-stable daemon dump exists, the OOM is captured and we tear down.
           xvfb-run -a gradle-profiler --benchmark \
+            --single-shot \
             --project-dir . \
             --scenario-file sync.scenarios.ci \
             --studio-install-dir "$RUNNER_TEMP/studio" \

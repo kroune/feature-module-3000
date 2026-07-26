@@ -19,8 +19,7 @@ Actions → **sync-benchmark** → *Run workflow*. Inputs:
 | `daemon_xmx` | `10g` | Gradle daemon heap (`-Xmx` = `-Xms`). Lower it for a quick smoke run (e.g. `2g` OOMs early). |
 | `studio_url` | Studio 2026.1.2 (Quail 2) | Android Studio `linux.tar.gz` URL — pick any build from [the releases list](https://jb.gg/android-studio-releases-list.json). |
 
-The job runs one cold Android Studio sync via gradle-profiler (`--warmups 0
---iterations 1`) on a 16 GB `ubuntu-latest` runner and uploads the artifact
+The job runs one cold Android Studio sync via gradle-profiler (`--single-shot`) on a 16 GB `ubuntu-latest` runner and uploads the artifact
 **sync-benchmark-dumps** (retained 7 days):
 
 - `heap-dumps/daemon/java_pid*.hprof.gz` — the Gradle daemon heap dump (the point of the repro)
@@ -42,11 +41,11 @@ mkdir -p heap-dumps
 sed "s|@HEAP_DUMP_DIR@|$PWD/heap-dumps|" sync.scenarios > sync.scenarios.ci
 
 gradle-profiler --benchmark \
+  --single-shot \
   --project-dir . \
   --scenario-file sync.scenarios.ci \
   --studio-install-dir /path/to/android-studio \
-  --output-dir results \
-  --warmups 0 --iterations 1
+  --output-dir results
 ```
 
 Dumps land in `heap-dumps/`, the benchmark report in `results/`.
