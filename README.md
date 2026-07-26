@@ -17,7 +17,7 @@ Actions → **sync-benchmark** → *Run workflow*. Inputs:
 |---|---|---|
 | `gradle_distribution_url` | `gradle-9.7.0-rc-1-bin.zip` | Any public Gradle zip URL — stable, RC, nightly, or a self-hosted custom build. Rewrites the wrapper for that run; the resolved version is printed in the log and job summary. |
 | `daemon_xmx` | `10g` | Gradle daemon heap (`-Xmx` = `-Xms`). Lower it for a quick smoke run (e.g. `2g` OOMs early). |
-| `studio_version` | `2026.1.2.10` | Android Studio version from `ide-zips`. |
+| `studio_url` | Studio 2026.1.2 (Quail 2) | Android Studio `linux.tar.gz` URL — pick any build from [the releases list](https://jb.gg/android-studio-releases-list.json). |
 
 The job runs one cold Android Studio sync via gradle-profiler (`--warmups 0
 --iterations 1`) on a 16 GB `ubuntu-latest` runner and uploads the artifact

@@ -15,9 +15,9 @@ on:
         description: "Gradle daemon heap, -Xmx = -Xms (use 2g for a quick smoke run)"
         default: "10g"
         type: string
-      studio_version:
-        description: "Android Studio version (from ide-zips)"
-        default: "2026.1.2.10"
+      studio_url:
+        description: "Android Studio linux.tar.gz URL (from jb.gg/android-studio-releases-list.json)"
+        default: "https://edgedl.me.gvt1.com/android/studio/ide-zips/2026.1.2.10/android-studio-quail2-linux.tar.gz"
         type: string
 
 env:
@@ -93,7 +93,7 @@ jobs:
 
       - name: Install Android Studio
         run: |
-          curl -sL -o studio.tar.gz "https://redirector.gvt1.com/edgedl/android/studio/ide-zips/${{ inputs.studio_version }}/android-studio-${{ inputs.studio_version }}-linux.tar.gz"
+          curl -sL -o studio.tar.gz "${{ inputs.studio_url }}"
           mkdir -p "$RUNNER_TEMP/studio"
           tar -xzf studio.tar.gz -C "$RUNNER_TEMP/studio" --strip-components=1
           rm studio.tar.gz
@@ -157,7 +157,7 @@ jobs:
             echo
             echo "- Gradle distribution: \`${{ inputs.gradle_distribution_url }}\`"
             echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`)"
-            echo "- Android Studio: \`${{ inputs.studio_version }}\`, gradle-profiler: \`$GRADLE_PROFILER_VERSION\`"
+            echo "- Android Studio: \`${{ inputs.studio_url }}\`, gradle-profiler: \`$GRADLE_PROFILER_VERSION\`"
             echo "- gradle-profiler exit code: \`${{ steps.bench.outputs.rc }}\`"
             echo
             echo '```'
