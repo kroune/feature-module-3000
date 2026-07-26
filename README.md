@@ -23,8 +23,8 @@ The job runs one cold Android Studio sync via gradle-profiler (`--warmups 0
 --iterations 1`) on a 16 GB `ubuntu-latest` runner and uploads the artifact
 **sync-benchmark-dumps** (retained 7 days):
 
-- `heap-dumps/daemon.hprof.gz` — the Gradle daemon heap dump (the point of the repro)
-- `heap-dumps/ide.hprof.gz` — IDE dump, if the IDE died instead
+- `heap-dumps/daemon/java_pid*.hprof.gz` — the Gradle daemon heap dump (the point of the repro)
+- `heap-dumps/ide/java_pid*.hprof.gz` — IDE dump, if the IDE died instead
 - `results/` — gradle-profiler benchmark report, `profiler.log`, Studio sandbox logs
 - the exact `gradle.properties`, wrapper properties and scenario file used
 

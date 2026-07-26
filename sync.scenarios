@@ -15,7 +15,7 @@ studio-sync-oom {
       "-Xms256m",
       "-Xmx4g",
       "-XX:+HeapDumpOnOutOfMemoryError",
-      "-XX:HeapDumpPath=@HEAP_DUMP_DIR@/ide.hprof.gz",
+      "-XX:HeapDumpPath=@HEAP_DUMP_DIR@/ide",
       "-XX:HeapDumpGzipLevel=1"
     ]
   }

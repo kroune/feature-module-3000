@@ -77,11 +77,11 @@ jobs:
       - name: Patch gradle.properties (heap cap, dump path, JDK 25 compact headers)
         run: |
           XMX='${{ inputs.daemon_xmx }}'
-          mkdir -p heap-dumps
+          mkdir -p heap-dumps/daemon heap-dumps/kotlin
           sed -i -E "/^org.gradle.jvmargs=/ s|-Xmx[0-9]+[gGmM]|-Xmx$XMX|" gradle.properties
           sed -i -E "/^org.gradle.jvmargs=/ s|-Xms[0-9]+[gGmM]|-Xms$XMX|" gradle.properties
-          sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/daemon.hprof.gz -XX:HeapDumpGzipLevel=1 -XX:+UseCompactObjectHeaders|" gradle.properties
-          sed -i "/^kotlin.daemon.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/kotlin-daemon.hprof.gz -XX:HeapDumpGzipLevel=1|" gradle.properties
+          sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/daemon -XX:HeapDumpGzipLevel=1 -XX:+UseCompactObjectHeaders|" gradle.properties
+          sed -i "/^kotlin.daemon.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/kotlin -XX:HeapDumpGzipLevel=1|" gradle.properties
           cat gradle.properties
 
       - name: Install gradle-profiler
@@ -106,25 +106,52 @@ jobs:
           GRADLE_USER_HOME: ${{ runner.temp }}/guh
         run: |
           if ! command -v xvfb-run >/dev/null; then sudo apt-get update && sudo apt-get install -y xvfb; fi
+          mkdir -p heap-dumps/ide
           sed "s|@HEAP_DUMP_DIR@|$GITHUB_WORKSPACE/heap-dumps|" sync.scenarios > sync.scenarios.ci
           cat sync.scenarios.ci
           set +e
+          # gradle-profiler hangs forever when the daemon dies mid-inspection/sync (the TAPI
+          # call never returns). Run it in the background and watch for the dump instead:
+          # once a size-stable daemon dump exists, the OOM is captured and we tear down.
           xvfb-run -a gradle-profiler --benchmark \
             --project-dir . \
             --scenario-file sync.scenarios.ci \
             --studio-install-dir "$RUNNER_TEMP/studio" \
             --output-dir results \
-            2>&1 | tee profiler.log
-          rc=${PIPESTATUS[0]}
-          echo "gradle-profiler exit code: $rc" | tee -a profiler.log
+            > profiler.log 2>&1 &
+          PROF=$!
+          DUMP_FOUND=""
+          while kill -0 $PROF 2>/dev/null; do
+            f=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+            if [ -n "$f" ]; then
+              s1=$(stat -c%s "$f"); sleep 30; s2=$(stat -c%s "$f" 2>/dev/null || echo 0)
+              if [ "$s1" -gt 0 ] && [ "$s1" = "$s2" ]; then
+                echo "watchdog: complete daemon dump detected ($f, $s1 bytes) — terminating the run"
+                DUMP_FOUND=1
+                kill -TERM $PROF 2>/dev/null || true
+                sleep 10
+                break
+              fi
+            else
+              sleep 30
+            fi
+          done
+          kill -KILL $PROF 2>/dev/null || true
+          pkill -KILL -f gradle-profiler 2>/dev/null || true
+          pkill -KILL -f GradleDaemon 2>/dev/null || true
+          pkill -KILL -f studio 2>/dev/null || true
+          wait $PROF 2>/dev/null; rc=$?
+          echo "gradle-profiler exit code: $rc (watchdog_dump=$DUMP_FOUND)" | tee -a profiler.log
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "== profiler.log tail =="
+          tail -100 profiler.log || true
           exit 0
 
       - name: Collect dumps
         if: always()
         run: |
           find heap-dumps -name '*.hprof' -exec gzip -1 {} \; 2>/dev/null || true
-          ls -la heap-dumps/ || true
+          ls -laR heap-dumps/ || true
           du -sh results 2>/dev/null || true
           df -h /; free -h
 
@@ -164,10 +191,11 @@ jobs:
             ./gradlew --version 2>/dev/null | sed -n '1,10p' || true
             echo '```'
             echo
-            ls -la heap-dumps/ 2>/dev/null || echo "no heap-dumps dir"
+            ls -laR heap-dumps/ 2>/dev/null || echo "no heap-dumps dir"
             echo
-            if [ -f heap-dumps/daemon.hprof.gz ]; then
-              echo "**OOM reproduced — Gradle daemon heap dump captured: heap-dumps/daemon.hprof.gz**"
+            dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+            if [ -n "$dump" ]; then
+              echo "**OOM reproduced — Gradle daemon heap dump captured: \`$dump\` ($(stat -c%s "$dump") bytes)**"
             else
               echo "**No daemon heap dump produced**"
             fi
@@ -176,8 +204,9 @@ jobs:
       - name: Verdict
         if: always()
         run: |
-          if [ -f heap-dumps/daemon.hprof.gz ] && [ "$(stat -c%s heap-dumps/daemon.hprof.gz)" -gt 10485760 ]; then
-            echo "OK: daemon heap dump captured (OOM reproduced)."
+          dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+          if [ -n "$dump" ] && [ "$(stat -c%s "$dump")" -gt 10485760 ]; then
+            echo "OK: daemon heap dump captured (OOM reproduced): $dump"
             exit 0
           fi
           if [ "${{ steps.bench.outputs.rc }}" = "0" ]; then
