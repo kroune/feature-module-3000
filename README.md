@@ -20,13 +20,16 @@ Actions → **sync-benchmark** → *Run workflow*. Inputs:
 | `studio_url` | Studio 2026.1.2 (Quail 2) | Android Studio `linux.tar.gz` URL — pick any build from [the releases list](https://jb.gg/android-studio-releases-list.json). |
 | `gradle_profiler_url` | patched 0.25.2 (this repo's releases) | gradle-profiler dist zip. The default build ships longer IDE-connect timeouts (upstream hardcodes 60s, too short for 9000 modules — see the `build-profiler` workflow). |
 
-The job runs one cold Android Studio sync via gradle-profiler (`--single-shot`) on a 16 GB `ubuntu-latest` runner and uploads the artifact
-**sync-benchmark-dumps** (retained 7 days):
+The job runs one cold Android Studio sync via gradle-profiler (`--single-shot`) on a 16 GB
+`ubuntu-latest` runner. Results are published two ways:
 
-- `heap-dumps/daemon/java_pid*.hprof.gz` — the Gradle daemon heap dump (the point of the repro)
-- `heap-dumps/ide/java_pid*.hprof.gz` — IDE dump, if the IDE died instead
-- `results/` — gradle-profiler benchmark report, `profiler.log`, Studio sandbox logs
-- the exact `gradle.properties`, wrapper properties and scenario file used
+- **A `run-N` release per run** (permanent, fast public download URLs — this is the
+  primary channel): `daemon.hprof.gz` (the Gradle daemon heap dump, the point of the
+  repro), `profiler.log`, benchmark CSV/HTML, the Studio `idea.log`, and the exact
+  `gradle.properties` / wrapper properties / scenario file used. The release title and
+  notes carry the Gradle version, heap settings and outcome.
+- **A `sync-benchmark-dumps` Actions artifact** (kept 7 days): everything above plus the
+  full sandbox logs. Handy for debugging, but artifact downloads are slow.
 
 CI runs the Gradle daemon on **JDK 25** with `-XX:+UseCompactObjectHeaders` (compressed
 object headers); the workflow patches that in, along with the absolute `HeapDumpPath`.

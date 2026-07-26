@@ -28,6 +28,8 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    permissions:
+      contents: write # publish result releases
     steps:
       - uses: actions/checkout@v4
 
@@ -194,6 +196,7 @@ jobs:
             echo "- Android Studio: \`${{ inputs.studio_url }}\`"
             echo "- gradle-profiler: \`${{ inputs.gradle_profiler_url }}\`"
             echo "- gradle-profiler exit code: \`${{ steps.bench.outputs.rc }}\`"
+            echo "- workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
             echo '```'
             ./gradlew --version 2>/dev/null | sed -n '1,10p' || true
@@ -207,7 +210,38 @@ jobs:
             else
               echo "**No daemon heap dump produced**"
             fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
+
+      # Results go to a release (not just artifacts): release assets have fast,
+      # stable, publicly accessible download URLs — Actions artifact downloads are slow.
+      - name: Publish results as a release
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="run-${{ github.run_number }}"
+          gver=$(basename '${{ inputs.gradle_distribution_url }}' | sed -E 's/^gradle-//; s/-(bin|all)\.zip$//')
+          dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+          assets=()
+          if [ -n "$dump" ]; then
+            cp "$dump" daemon.hprof.gz && assets+=(daemon.hprof.gz)
+            outcome="OOM reproduced ($(stat -c%s "$dump") bytes gzipped)"
+          elif [ "${{ steps.bench.outputs.rc }}" = "0" ]; then
+            outcome="sync completed, no OOM"
+          else
+            outcome="failed, no dump"
+          fi
+          for f in profiler.log summary.md sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties \
+                   results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log; do
+            [ -f "$f" ] && assets+=("$f")
+          done
+          ide=$(ls -S heap-dumps/ide/*.hprof.gz 2>/dev/null | head -1)
+          [ -n "$ide" ] && cp "$ide" ide.hprof.gz && assets+=(ide.hprof.gz)
+          gh release delete "$tag" --yes -R '${{ github.repository }}' 2>/dev/null || true
+          gh release create "$tag" -R '${{ github.repository }}' \
+            --title "Sync run #${{ github.run_number }} — Gradle $gver, daemon ${{ inputs.daemon_xmx }} — $outcome" \
+            --notes-file summary.md \
+            "${assets[@]}"
 
       - name: Verdict
         if: always()
