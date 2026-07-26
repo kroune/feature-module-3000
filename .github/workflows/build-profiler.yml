@@ -51,8 +51,8 @@ jobs:
           cd gp
           zip=$(ls build/distributions/gradle-profiler-*.zip | head -1)
           echo "Publishing $zip"
-          gh release delete '${{ inputs.release_tag }}' --yes 2>/dev/null || true
-          gh release create '${{ inputs.release_tag }}' \
+          gh release delete '${{ inputs.release_tag }}' --yes -R '${{ github.repository }}' 2>/dev/null || true
+          gh release create '${{ inputs.release_tag }}' -R '${{ github.repository }}' \
             --title "Patched gradle-profiler (long IDE-connect timeouts)" \
             --notes "Built from gradle/gradle-profiler ${{ inputs.profiler_ref }} with IDE_START/PLUGIN_CONNECT/AGENT_CONNECT timeouts raised to 10/30/30 minutes. Used by sync-benchmark.yml." \
             --prerelease \
