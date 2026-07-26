@@ -62,8 +62,8 @@ jobs:
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           command -v sdkmanager >/dev/null && SDKM=sdkmanager
           yes | "$SDKM" --licenses >/dev/null || true
-          if [ ! -d "$ANDROID_HOME/platforms/android-37" ]; then
-            "$SDKM" "platforms;android-37"
+          if ! ls -d "$ANDROID_HOME"/platforms/android-37* >/dev/null 2>&1; then
+            "$SDKM" "platforms;android-37.0"
           fi
           ls "$ANDROID_HOME/platforms"
 
