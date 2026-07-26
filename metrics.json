@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "projectName": "androidFeature_sliced3000modules",
+  "shape": "feature_sliced",
+  "requestedModules": 3000,
+  "generatorCommit": "4446683",
+  "params": {"seed": "42", "treeArity": "3", "chains": "10", "fsCoreFraction": "0.04", "fsApiCommons": "1..3", "fsImplApis": "3..5", "fsImplCommons": "3..6", "fsUiCommons": "1..2", "layers": "5", "classesPerModule": "10", "classesPerModuleType": "FIXED"},
+  "versions": {"gradle": "9.6.0", "kgp": "2.4.0", "coroutines": "1.11.0", "jdkToolchain": "21"},
+  "graph": {
+    "modules": 3000,
+    "edges": 16360,
+    "edgesPerModule": 5.4533,
+    "density": 0.00363677,
+    "depth": 4,
+    "layerWidths": {"0": 50, "1": 36, "2": 36, "3": 959, "4": 959, "5": 959, "6": 1},
+    "outDegree": {"mean": 5.4533, "median": 3, "p90": 10, "max": 1918, "histogram": {"0": 50, "1": 342, "2": 372, "3": 815, "4": 461, "7": 84, "8": 158, "9": 248, "10": 252, "11": 141, "12": 76, "1918": 1}},
+    "inDegree": {"mean": 5.4533, "median": 1, "p90": 8, "max": 1002, "histogram": {"0": 1, "1": 1918, "2": 14, "3": 70, "4": 146, "5": 199, "6": 181, "7": 145, "8": 107, "9": 59, "10": 19, "11": 11, "12": 7, "14": 1, "31": 1, "38": 2, "39": 4, "40": 2, "42": 2, "43": 3, "44": 3, "45": 2, "46": 1, "47": 3, "48": 2, "49": 2, "50": 2, "51": 1, "52": 2, "53": 2, "56": 2, "57": 1, "58": 4, "59": 1, "60": 1, "61": 2, "62": 7, "63": 2, "64": 2, "65": 2, "67": 4, "68": 4, "69": 5, "70": 3, "71": 5, "72": 6, "73": 3, "74": 6, "75": 1, "76": 3, "77": 3, "78": 2, "79": 2, "80": 4, "81": 2, "82": 1, "84": 2, "85": 1, "86": 1, "87": 2, "89": 1, "91": 1, "96": 1, "1002": 1}},
+    "topInDegree": [{"module": ":core:core-ui", "inDegree": 1002}, {"module": ":foundation:foundation-9", "inDegree": 96}, {"module": ":common:common-7", "inDegree": 91}, {"module": ":common:common-31", "inDegree": 89}, {"module": ":foundation:foundation-31", "inDegree": 87}, {"module": ":common:common-32", "inDegree": 87}, {"module": ":common:common-19", "inDegree": 86}, {"module": ":foundation:foundation-2", "inDegree": 85}, {"module": ":foundation:foundation-37", "inDegree": 84}, {"module": ":common:common-22", "inDegree": 84}]
+  }
+}

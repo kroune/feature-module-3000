@@ -1,0 +1,13 @@
+package com.awesomeapp.f502ui
+
+sealed class State2543_8 {
+    data object Loading : State2543_8()
+    data class Success(val data: String) : State2543_8()
+    data class Error(val message: String) : State2543_8()
+
+    companion object {
+        fun loading() = Loading
+        fun success(data: String) = Success(data)
+        fun error(message: String) = Error(message)
+    }
+}

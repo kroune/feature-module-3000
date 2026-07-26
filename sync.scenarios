@@ -1,0 +1,25 @@
+// Single cold Android Studio sync of the 3000-module project.
+// Expected outcome on a 16 GB machine: the Gradle daemon dies with
+// OutOfMemoryError and writes a gzipped heap dump (see gradle.properties).
+default-scenarios = ["studio-sync-oom"]
+
+studio-sync-oom {
+  title = "Android Studio sync (Gradle daemon OOM repro)"
+
+  studio-sync {
+    // The IDE only drives the sync; a modest heap is enough. The heap-dump
+    // flags are cheap insurance in case the IDE process dies instead.
+    // @HEAP_DUMP_DIR@ is substituted with an absolute path before running
+    // (CI does it automatically; locally: sed "s|@HEAP_DUMP_DIR@|$PWD/heap-dumps|" sync.scenarios > sync.scenarios.ci)
+    ide-jvm-args = [
+      "-Xms256m",
+      "-Xmx4g",
+      "-XX:+HeapDumpOnOutOfMemoryError",
+      "-XX:HeapDumpPath=@HEAP_DUMP_DIR@/ide.hprof.gz",
+      "-XX:HeapDumpGzipLevel=1"
+    ]
+  }
+
+  warm-ups = 0
+  iterations = 1
+}

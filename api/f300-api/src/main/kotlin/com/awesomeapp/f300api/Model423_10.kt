@@ -1,0 +1,7 @@
+package com.awesomeapp.f300api
+
+data class Model423_10(
+    val id: String = "Model423_10-1783700710988",
+    val name: String = "Model for Model423_10",
+    val description: String = "Description for Model423_10"
+)

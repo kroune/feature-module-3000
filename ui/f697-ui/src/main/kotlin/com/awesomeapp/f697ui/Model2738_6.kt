@@ -1,0 +1,7 @@
+package com.awesomeapp.f697ui
+
+data class Model2738_6(
+    val id: String = "Model2738_6-1783700711727",
+    val name: String = "Model for Model2738_6",
+    val description: String = "Description for Model2738_6"
+)

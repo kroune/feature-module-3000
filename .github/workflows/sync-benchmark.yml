@@ -1,0 +1,185 @@
+name: sync-benchmark
+
+# Reproduces the Gradle daemon OutOfMemoryError during an Android Studio sync of this
+# 3000-module project on a 16 GB runner, and uploads the (gzipped) heap dump.
+#
+# The benchmark is manual-only: every run is expensive and produces multi-GB artifacts.
+on:
+  workflow_dispatch:
+    inputs:
+      gradle_distribution_url:
+        description: "Gradle distribution zip URL (stable / RC / nightly / custom build)"
+        default: "https://services.gradle.org/distributions/gradle-9.7.0-rc-1-bin.zip"
+        type: string
+      daemon_xmx:
+        description: "Gradle daemon heap, -Xmx = -Xms (use 2g for a quick smoke run)"
+        default: "10g"
+        type: string
+      studio_version:
+        description: "Android Studio version (from ide-zips)"
+        default: "2026.1.2.10"
+        type: string
+
+env:
+  GRADLE_USER_HOME: ${{ runner.temp }}/guh
+  GRADLE_PROFILER_VERSION: "0.25.2"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "== before =="; df -h /; free -h
+          sudo rm -rf /usr/share/dotnet /usr/local/share/boost /opt/ghc /usr/share/swift \
+            "$AGENT_TOOLSDIRECTORY/CodeQL" || true
+          docker system prune -af || true
+          echo "== after =="; df -h /
+
+      # Compressed RAM swap: zero disk cost, keeps the kernel OOM-killer away from the
+      # daemon so the JVM itself throws OutOfMemoryError (which is what writes the dump).
+      - name: Add zram swap
+        run: |
+          if sudo modprobe zram; then
+            echo lz4 | sudo tee /sys/block/zram0/comp_algorithm
+            echo 8G | sudo tee /sys/block/zram0/disksize
+            sudo mkswap /dev/zram0 && sudo swapon -p 100 /dev/zram0
+          else
+            echo "zram unavailable, continuing without extra swap"
+          fi
+          free -h; swapon --show
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Android SDK setup
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          command -v sdkmanager >/dev/null && SDKM=sdkmanager
+          yes | "$SDKM" --licenses >/dev/null || true
+          if [ ! -d "$ANDROID_HOME/platforms/android-37" ]; then
+            "$SDKM" "platforms;android-37"
+          fi
+          ls "$ANDROID_HOME/platforms"
+
+      - name: Pin Gradle distribution
+        run: |
+          url='${{ inputs.gradle_distribution_url }}'
+          esc=$(printf '%s' "$url" | sed 's/[&\\]/\\&/g')
+          sed -i "s|^distributionUrl=.*|distributionUrl=$esc|" gradle/wrapper/gradle-wrapper.properties
+          grep '^distributionUrl' gradle/wrapper/gradle-wrapper.properties
+
+      - name: Patch gradle.properties (heap cap, dump path, JDK 25 compact headers)
+        run: |
+          XMX='${{ inputs.daemon_xmx }}'
+          mkdir -p heap-dumps
+          sed -i -E "/^org.gradle.jvmargs=/ s|-Xmx[0-9]+[gGmM]|-Xmx$XMX|" gradle.properties
+          sed -i -E "/^org.gradle.jvmargs=/ s|-Xms[0-9]+[gGmM]|-Xms$XMX|" gradle.properties
+          sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/daemon.hprof.gz -XX:HeapDumpGzipLevel=1 -XX:+UseCompactObjectHeaders|" gradle.properties
+          sed -i "/^kotlin.daemon.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/kotlin-daemon.hprof.gz -XX:HeapDumpGzipLevel=1|" gradle.properties
+          cat gradle.properties
+
+      - name: Install gradle-profiler
+        run: |
+          curl -sL -o gp.zip "https://github.com/gradle/gradle-profiler/releases/download/v${GRADLE_PROFILER_VERSION}/gradle-profiler-${GRADLE_PROFILER_VERSION}.zip"
+          unzip -q gp.zip -d "$RUNNER_TEMP" && rm gp.zip
+          echo "$RUNNER_TEMP/gradle-profiler-${GRADLE_PROFILER_VERSION}/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/gradle-profiler-${GRADLE_PROFILER_VERSION}/bin/gradle-profiler" --version
+
+      - name: Install Android Studio
+        run: |
+          curl -sL -o studio.tar.gz "https://redirector.gvt1.com/edgedl/android/studio/ide-zips/${{ inputs.studio_version }}/android-studio-${{ inputs.studio_version }}-linux.tar.gz"
+          mkdir -p "$RUNNER_TEMP/studio"
+          tar -xzf studio.tar.gz -C "$RUNNER_TEMP/studio" --strip-components=1
+          rm studio.tar.gz
+          ls "$RUNNER_TEMP/studio/bin"
+          df -h /
+
+      - name: Run Android Studio sync via gradle-profiler
+        id: bench
+        run: |
+          if ! command -v xvfb-run >/dev/null; then sudo apt-get update && sudo apt-get install -y xvfb; fi
+          sed "s|@HEAP_DUMP_DIR@|$GITHUB_WORKSPACE/heap-dumps|" sync.scenarios > sync.scenarios.ci
+          cat sync.scenarios.ci
+          set +e
+          xvfb-run -a gradle-profiler --benchmark \
+            --project-dir . \
+            --scenario-file sync.scenarios.ci \
+            --studio-install-dir "$RUNNER_TEMP/studio" \
+            --output-dir results \
+            2>&1 | tee profiler.log
+          rc=${PIPESTATUS[0]}
+          echo "gradle-profiler exit code: $rc" | tee -a profiler.log
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Collect dumps
+        if: always()
+        run: |
+          find heap-dumps -name '*.hprof' -exec gzip -1 {} \; 2>/dev/null || true
+          ls -la heap-dumps/ || true
+          du -sh results 2>/dev/null || true
+          df -h /; free -h
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-benchmark-dumps-${{ github.run_number }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            heap-dumps/
+            profiler.log
+            sync.scenarios.ci
+            gradle.properties
+            gradle/wrapper/gradle-wrapper.properties
+            results/*.csv
+            results/*.html
+            results/*.log
+            results/**/log/**
+            results/**/logs/**
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Android Studio sync benchmark"
+            echo
+            echo "- Gradle distribution: \`${{ inputs.gradle_distribution_url }}\`"
+            echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`)"
+            echo "- Android Studio: \`${{ inputs.studio_version }}\`, gradle-profiler: \`$GRADLE_PROFILER_VERSION\`"
+            echo "- gradle-profiler exit code: \`${{ steps.bench.outputs.rc }}\`"
+            echo
+            echo '```'
+            ./gradlew --version 2>/dev/null | sed -n '1,10p' || true
+            echo '```'
+            echo
+            ls -la heap-dumps/ 2>/dev/null || echo "no heap-dumps dir"
+            echo
+            if [ -f heap-dumps/daemon.hprof.gz ]; then
+              echo "**OOM reproduced — Gradle daemon heap dump captured: heap-dumps/daemon.hprof.gz**"
+            else
+              echo "**No daemon heap dump produced**"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verdict
+        if: always()
+        run: |
+          if [ -f heap-dumps/daemon.hprof.gz ] && [ "$(stat -c%s heap-dumps/daemon.hprof.gz)" -gt 10485760 ]; then
+            echo "OK: daemon heap dump captured (OOM reproduced)."
+            exit 0
+          fi
+          if [ "${{ steps.bench.outputs.rc }}" = "0" ]; then
+            echo "OK: sync completed without OOM."
+            exit 0
+          fi
+          echo "FAIL: profiler errored and no daemon dump was captured."
+          exit 1

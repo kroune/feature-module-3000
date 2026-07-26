@@ -1,0 +1,13 @@
+package com.awesomeapp.f289ui
+
+sealed class State2330_7 {
+    data object Loading : State2330_7()
+    data class Success(val data: String) : State2330_7()
+    data class Error(val message: String) : State2330_7()
+
+    companion object {
+        fun loading() = Loading
+        fun success(data: String) = Success(data)
+        fun error(message: String) = Error(message)
+    }
+}

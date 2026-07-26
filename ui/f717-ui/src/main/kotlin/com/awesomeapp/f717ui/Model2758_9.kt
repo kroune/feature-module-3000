@@ -1,0 +1,7 @@
+package com.awesomeapp.f717ui
+
+data class Model2758_9(
+    val id: String = "Model2758_9-1783700711735",
+    val name: String = "Model for Model2758_9",
+    val description: String = "Description for Model2758_9"
+)
