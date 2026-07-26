@@ -107,6 +107,9 @@ jobs:
         id: bench
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/guh
+          # Force gradle-profiler to launch the IDE with its headless starter
+          # (full-GUI Studio hangs on project frame creation on CI).
+          GRADLE_PROFILER_OPTS: "-Dide.tests.headless=true"
         run: |
           if ! command -v xvfb-run >/dev/null; then sudo apt-get update && sudo apt-get install -y xvfb; fi
           mkdir -p heap-dumps/ide
