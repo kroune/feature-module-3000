@@ -118,6 +118,8 @@ jobs:
           sed "s|@HEAP_DUMP_DIR@|$GITHUB_WORKSPACE/heap-dumps|" sync.scenarios > sync.scenarios.ci
           cat sync.scenarios.ci
           set +e
+          # DIAG: capture kernel OOM evidence if the step gets terminated
+          trap 'echo "== SIGTERM trap =="; free -h; sudo dmesg -T 2>/dev/null | grep -iE "out of memory|oom-kill|killed process" | tail -30' TERM
           # gradle-profiler hangs forever when the daemon dies mid-inspection/sync (the TAPI
           # call never returns). Run it in the background and watch for the dump instead:
           # once a size-stable daemon dump exists, the OOM is captured and we tear down.
@@ -142,6 +144,12 @@ jobs:
                 break
               fi
             else
+              # DIAG: periodic memory/disk state, streamed live to the step log
+              echo "== watchdog $(date -u +%H:%M:%S) =="
+              free -h | sed -n 2p
+              df -h / | tail -1
+              ps -eo rss=,comm= --sort=-rss | head -6
+              sudo dmesg -T 2>/dev/null | grep -iE "out of memory|oom-kill|killed process" | tail -3
               sleep 30
             fi
           done
