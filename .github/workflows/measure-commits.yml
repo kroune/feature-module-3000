@@ -41,7 +41,7 @@ on:
         type: string
       daemon_xmx:
         description: "Gradle daemon heap, -Xmx = -Xms (use 2g for a quick smoke run)"
-        default: "10g"
+        default: "9g"
         type: string
       studio_url:
         description: "Android Studio linux.tar.gz URL (from jb.gg/android-studio-releases-list.json)"
