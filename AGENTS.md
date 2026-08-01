@@ -25,9 +25,20 @@ the app modules themselves.
 - `.github/workflows/sync-benchmark.yml` — the benchmark (see README for the full
   run-down). `.github/workflows/build-profiler.yml` — builds the patched gradle-profiler
   and publishes it under the `patched-profiler` release tag.
+- `.github/workflows/measure-commits.yml` — end-to-end comparison of two Gradle refs
+  (e.g. an upstream commit vs a fork branch with an optimization) in a single run:
+  resolves the refs to SHAs, builds both bin distributions from source
+  (`:distributions-full:binDistributionZip`, JDK 25) and runs the sync benchmark
+  against both in parallel. Built dists are cached as `gradle-build-<sha12>` release
+  assets, so re-measuring a commit skips its ~35 min build. Default daemon heap here
+  is `9g` (not 10g).
 
 ## Commands
 
+- Compare two Gradle refs: `gh workflow run measure-commits.yml`
+  `-f base_repo=gradle/gradle -f base_ref=<sha>`
+  `-f candidate_repo=kroune/gradle-fork -f candidate_ref=<branch>`
+  (result releases: `run-<N>-base` / `run-<N>-candidate`).
 - Trigger a benchmark run: `gh workflow run sync-benchmark.yml`
   (inputs: `gradle_distribution_url`, `daemon_xmx`, `studio_url`, `gradle_profiler_url`;
   use `-f daemon_xmx=2g` for a ~12 min smoke run).
