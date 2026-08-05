@@ -416,6 +416,7 @@ jobs:
             --title "Sync run #${{ github.run_number }} (${{ matrix.name }}) — Gradle $gver, daemon ${{ inputs.daemon_xmx }} — $outcome" \
             --notes-file summary.md \
             "${assets[@]}"
+          echo "**Results published: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$tag**" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verdict
         if: always()
