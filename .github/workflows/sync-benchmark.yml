@@ -261,6 +261,29 @@ jobs:
             "${assets[@]}"
           echo "**Results published: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$tag**" >> "$GITHUB_STEP_SUMMARY"
 
+      # Kick off MAT index building in the heap-report repo; a no-op when the PAT
+      # secret is absent or no daemon dump was produced.
+      - name: Trigger MAT index build (heap-report)
+        if: always()
+        env:
+          PAT: ${{ secrets.HEAP_REPORT_PAT }}
+        run: |
+          tag="run-${{ github.run_number }}"
+          if [ -z "$PAT" ]; then
+            echo "HEAP_REPORT_PAT not set — skipping index-build dispatch"
+            exit 0
+          fi
+          dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+          if [ -z "$dump" ]; then
+            echo "no daemon dump — skipping index-build dispatch"
+            exit 0
+          fi
+          GH_TOKEN="$PAT" gh api repos/kroune/heap-report/dispatches \
+            -f event_type=build-indexes \
+            -F "client_payload[source_repo]=${{ github.repository }}" \
+            -F "client_payload[release_tag]=$tag"
+          echo "dispatched build-indexes for $tag"
+
       - name: Verdict
         if: always()
         run: |

@@ -48,6 +48,64 @@ What a run does, end to end (~45 min at defaults):
 The job is green when the daemon dump exists (OOM reproduced) or the sync completed
 without OOM; red otherwise.
 
+## Heap-dump analysis: `heap-report`
+
+Daemon dumps are analyzed with the viewer at
+**[kroune/heap-report](https://github.com/kroune/heap-report)**: after each run
+release is published, the workflows here fire a `repository_dispatch` (guarded by
+the `HEAP_REPORT_PAT` secret; skipped silently when unset or when no dump exists)
+that triggers its `build-indexes` workflow — an Eclipse MAT parse on a CI runner,
+published as an `idx-<tag>` release (zstd-compressed indexes). The viewer's local
+UI (`serve.py` → Remote tab) autodiscovers `run-*`/`idx-*` releases, downloads
+dump + indexes on demand, and runs only the cheap analysis locally — no local
+40 min MAT parse. See that repo's README for setup.
+
+**Choosing `daemon_xmx`:** the daemon heap must be small enough that the *JVM* throws
+`OutOfMemoryError` before the 16 GB runner's kernel OOM-killer picks the daemon
+(kernel kills write no dump). With Gradle 9.7.0-rc-1, 10g works; with newer Gradle
+(9.8.0-era) 10g loses that race — use **9g**. The failure signature is a step dying
+~35–45 min into the sync with exit 143 / "The operation was canceled" / "hosted runner
+lost communication", all `if: always()` steps skipped and no artifacts published.
+Also note the zram step currently fails open (`modprobe zram` finds no module on the
+6.17-azure kernel), so runs fall back to the runner's default 3 GB swapfile.
+
+## The `measure-commits` workflow
+
+Actions → **measure-commits** → *Run workflow* — end-to-end memory comparison of two
+Gradle refs (typically an upstream commit vs a fork branch with an optimization) in a
+single run: `resolve → build (both in parallel) → sync (both in parallel)`.
+
+```bash
+gh workflow run measure-commits.yml \
+  -f base_repo=gradle/gradle -f base_ref=<sha> \
+  -f candidate_repo=kroune/gradle-fork -f candidate_ref=<branch>
+```
+
+| Input | Default | Meaning |
+|---|---|---|
+| `base_repo` / `base_ref` | `gradle/gradle` / (required) | Baseline Gradle checkout — branch, tag, or SHA. |
+| `candidate_repo` / `candidate_ref` | `kroune/gradle-fork` / (required) | Candidate Gradle checkout — branch, tag, or SHA. |
+| `daemon_xmx` | `9g` | Daemon heap for both syncs. Lower than sync-benchmark's 10g on purpose — see the warning above. |
+| `studio_url`, `gradle_profiler_url` | same as sync-benchmark | Same meaning as in sync-benchmark. |
+
+What a run does:
+
+1. `resolve` turns both refs into full SHAs (via the GitHub API).
+2. `build` (one job per ref, parallel) compiles the bin distribution from source
+   (`:distributions-full:binDistributionZip`, JDK 25 + 21/17 toolchains) and publishes
+   it as `gradle-<sha12>-bin.zip` under the `gradle-build-<sha12>` release tag in this
+   repo. The build is **skipped entirely when that release already exists**, so
+   re-measuring a commit costs no rebuild. Build time ranges from minutes (remote
+   build-cache hits) to ~1–2 h cold.
+3. `sync` (one job per ref, parallel) runs the exact same cold headless Studio sync as
+   sync-benchmark against the freshly built distribution and publishes
+   **`run-<N>-base` / `run-<N>-candidate`** releases with the daemon heap dump, logs,
+   and configs. Both legs use identical settings, so the two dumps are directly
+   comparable.
+
+Green means the same as in sync-benchmark (per leg): dump captured, or sync completed
+without OOM.
+
 ### Observed behavior (baseline, Gradle 9.7.0-rc-1, JDK 25)
 
 - Full configuration (`:help`, run by gradle-profiler's inspection) fits in 10 g — the

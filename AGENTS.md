@@ -31,7 +31,13 @@ the app modules themselves.
   (`:distributions-full:binDistributionZip`, JDK 25) and runs the sync benchmark
   against both in parallel. Built dists are cached as `gradle-build-<sha12>` release
   assets, so re-measuring a commit skips its ~35 min build. Default daemon heap here
-  is `9g` (not 10g).
+  is `9g` (not 10g) — see the kernel OOM-killer gotcha below for why.
+- `kroune/heap-report` (separate repo) — the dump viewer + MAT index builder. Both
+  benchmark workflows end with a `Trigger MAT index build` step that fires a
+  `repository_dispatch` there (`build-indexes` workflow → `idx-<tag>` release with
+  zstd-compressed MAT indexes). The step is a silent no-op unless the
+  **`HEAP_REPORT_PAT`** secret is set on this repo (PAT with Contents-RW on
+  heap-report — GITHUB_TOKEN can't dispatch cross-repo) and a daemon dump exists.
 
 ## Commands
 
@@ -39,6 +45,11 @@ the app modules themselves.
   `-f base_repo=gradle/gradle -f base_ref=<sha>`
   `-f candidate_repo=kroune/gradle-fork -f candidate_ref=<branch>`
   (result releases: `run-<N>-base` / `run-<N>-candidate`).
+- AI-driven branch benchmark: the `/measure-oom` project skill
+  (`.kimi-code/skills/measure-oom/SKILL.md`) takes a fork-branch link, dispatches
+  measure-commits with base = merge-base against `gradle/gradle` master, watches the run,
+  retries infra failures (max 2), and walks `daemon_xmx` down 1g at a time (floor 3g)
+  until the candidate OOMs.
 - Trigger a benchmark run: `gh workflow run sync-benchmark.yml`
   (inputs: `gradle_distribution_url`, `daemon_xmx`, `studio_url`, `gradle_profiler_url`;
   use `-f daemon_xmx=2g` for a ~12 min smoke run).
@@ -68,8 +79,17 @@ the app modules themselves.
   `daemon.hprof.gz.part-*` (reassemble with `cat`). Actions artifact downloads are very
   slow (~0.2 MB/s); releases are the primary distribution channel.
 - The runner is 16 GB: keep daemon `-Xmx` + IDE `-Xmx` low enough that the *JVM* throws
-  OOM before the kernel OOM-killer fires (kernel kills write no dump). zram swap is the
-  insurance — a swap *file* would eat the disk.
+  OOM before the kernel OOM-killer fires (kernel kills write no dump). If `-Xmx` is too
+  high the daemon sits at max RSS while the IDE model-fetch squeezes the box, and the
+  kernel kills the daemon (it carries `oom_score_adj=500` — the first target). The
+  signature: the sync step dies ~35-45 min in with exit 143 / "The operation was
+  canceled" / "hosted runner lost communication", all `if: always()` steps get skipped,
+  and nothing is published. Confirm via `dmesg`: `Out of memory: Killed process ...
+  (java)`. For 9.8.0-era Gradle with the default 4g IDE heap, **9g works, 10g loses the
+  race** (10g was fine for 9.7.0-rc-1, which JVM-OOM'd earlier).
+- The zram step currently fails open: `modprobe zram` → "Module zram not found" on the
+  6.17-azure kernel of current ubuntu-latest images, so runs fall back to the runner's
+  default 3 GB `/swapfile`. Keep the step (it may come back), but don't count on the 8G.
 - Android SDK: API 37 is published as `platforms;android-37.0` (not `android-37`).
 - Android Studio "Quail" downloads are named by codename
   (`android-studio-quail2-linux.tar.gz`), not by version.
