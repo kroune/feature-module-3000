@@ -47,9 +47,10 @@ the app modules themselves.
   (result releases: `run-<N>-base` / `run-<N>-candidate`).
 - AI-driven branch benchmark: the `/measure-oom` project skill
   (`.kimi-code/skills/measure-oom/SKILL.md`) takes a fork-branch link, dispatches
-  measure-commits with base = merge-base against `gradle/gradle` master, watches the run,
-  retries infra failures (max 2), and walks `daemon_xmx` down 1g at a time (floor 3g)
-  until the candidate OOMs.
+  measure-commits with base = merge-base against `gradle/gradle` master, watches the run
+  (plus a recurring 30-min stuck-check cron), retries infra failures (max 2), and walks
+  `daemon_xmx` down 1g at a time (floor 3g) until the candidate OOMs. Explicit user
+  invocation only — the model must never dispatch a benchmark on its own.
 - Trigger a benchmark run: `gh workflow run sync-benchmark.yml`
   (inputs: `gradle_distribution_url`, `daemon_xmx`, `studio_url`, `gradle_profiler_url`;
   use `-f daemon_xmx=2g` for a ~12 min smoke run).
