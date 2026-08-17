@@ -54,4 +54,5 @@ gradle-user-home/
 heap-dumps/
 results/
 studio-sandbox/
-sync.scenarios.ci
+sync.scenarios.ciprobe-run.log
+results-probe/
