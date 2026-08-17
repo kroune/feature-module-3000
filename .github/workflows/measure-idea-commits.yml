@@ -370,8 +370,10 @@ jobs:
           if ls heap-dumps/daemon/*.p[0-9] >/dev/null 2>&1; then
             echo "WARNING: truncated heap dump (unmerged segments present)" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
-          # Preserve the Gradle daemon logs for diagnostics (they live in GRADLE_USER_HOME)
+          # Preserve the Gradle daemon logs for diagnostics (the sync daemon uses the
+          # project's gradle-user-home; the profiler's own daemons use $RUNNER_TEMP/guh)
           mkdir -p daemon-logs
+          cp gradle-user-home/daemon/*/daemon-*.out.log daemon-logs/ 2>/dev/null || true
           cp '${{ runner.temp }}'/guh/daemon/*/daemon-*.out.log daemon-logs/ 2>/dev/null || true
           tar -czf daemon-logs.tar.gz -C daemon-logs . 2>/dev/null || true
           if [ '${{ inputs.dump_models }}' = 'true' ] && [ -n "$(ls -A model-dumps 2>/dev/null)" ]; then
