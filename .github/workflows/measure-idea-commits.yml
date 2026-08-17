@@ -17,12 +17,12 @@ name: measure-idea-commits
 #               (the tooling extension runs inside the Gradle daemon during sync; the
 #               rest of the IDE is untouched). The Gradle distribution is FIXED for both
 #               legs via gradle_distribution_url, so only the IDE side differs.
-#               Publishes an idea-run-<run_number>-<base|candidate> release with the
+#               Publishes an run-idea-<run_number>-<base|candidate> release with the
 #               daemon heap dump.
 # - compare:    with dump_models=true the sync also writes a text dump of the resolved
 #               dependency models (enabled by -Didea.gradle.daemon.dependency.model.dump,
 #               supported by both measured branches); compare downloads both legs' dumps
-#               and publishes a per-configuration diff as idea-run-<run_number>-model-diff.
+#               and publishes a per-configuration diff as run-idea-<run_number>-model-diff.
 #
 # Usage:
 #   gh workflow run measure-idea-commits.yml \
@@ -189,7 +189,7 @@ jobs:
   # Same sync logic as the sync job in measure-commits.yml — kept as a copy on purpose
   # (single self-contained workflow run). Differences: the Gradle distribution is a fixed
   # input for both legs, the Studio tooling-extension jars are overlaid from the
-  # build-idea job, release tags use the idea-run- prefix, and dump_models=true enables
+  # build-idea job, release tags use the run-idea- prefix, and dump_models=true enables
   # the dependency model dump.
   sync:
     needs: [resolve, build-idea]
@@ -436,7 +436,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="idea-run-${{ github.run_number }}-${{ matrix.name }}"
+          tag="run-idea-${{ github.run_number }}-${{ matrix.name }}"
           gver=$(basename '${{ steps.urls.outputs.gradle_url }}' | sed -E 's/^gradle-//; s/-(bin|all)\.zip$//')
           dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
           assets=()
@@ -485,7 +485,7 @@ jobs:
         env:
           PAT: ${{ secrets.HEAP_REPORT_PAT }}
         run: |
-          tag="idea-run-${{ github.run_number }}-${{ matrix.name }}"
+          tag="run-idea-${{ github.run_number }}-${{ matrix.name }}"
           if [ -z "$PAT" ]; then
             echo "HEAP_REPORT_PAT not set — skipping index-build dispatch"
             exit 0
@@ -532,9 +532,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p base candidate
-          gh release download "idea-run-${{ github.run_number }}-base" -R '${{ github.repository }}' \
+          gh release download "run-idea-${{ github.run_number }}-base" -R '${{ github.repository }}' \
             -p model-dumps.tar.gz -O base.tar.gz --clobber
-          gh release download "idea-run-${{ github.run_number }}-candidate" -R '${{ github.repository }}' \
+          gh release download "run-idea-${{ github.run_number }}-candidate" -R '${{ github.repository }}' \
             -p model-dumps.tar.gz -O candidate.tar.gz --clobber
           tar -xzf base.tar.gz -C base
           tar -xzf candidate.tar.gz -C candidate
@@ -545,7 +545,7 @@ jobs:
         run: |
           set -uo pipefail
           {
-            echo "# Dependency model diff (idea-run-${{ github.run_number }})"
+            echo "# Dependency model diff (run-idea-${{ github.run_number }})"
             echo
             echo "- base: \`${{ inputs.base_repo }}@${{ inputs.base_ref }}\`"
             echo "- candidate: \`${{ inputs.candidate_repo }}@${{ inputs.candidate_ref }}\`"
@@ -598,7 +598,7 @@ jobs:
       - name: Publish model diff as a release
         if: always()
         run: |
-          tag="idea-run-${{ github.run_number }}-model-diff"
+          tag="run-idea-${{ github.run_number }}-model-diff"
           gh release delete "$tag" --yes -R '${{ github.repository }}' 2>/dev/null || true
           gh release create "$tag" -R '${{ github.repository }}' \
             --title "IDEA sync run #${{ github.run_number }} — dependency model diff" \
