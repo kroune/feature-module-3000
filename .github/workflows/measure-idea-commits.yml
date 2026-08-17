@@ -330,6 +330,14 @@ jobs:
           while kill -0 $PROF 2>/dev/null; do
             f=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
             if [ -n "$f" ]; then
+              # JDK 25+ writes gzipped heap dumps in parallel segments: the main file
+              # holds the header (small and size-stable) while workers write *.p0/*.p1/...
+              # segments that are merged at the end. A stable main file with segments
+              # present means the dump is still in progress — keep waiting.
+              if ls heap-dumps/daemon/*.p[0-9] >/dev/null 2>&1; then
+                sleep 30
+                continue
+              fi
               s1=$(stat -c%s "$f"); sleep 30; s2=$(stat -c%s "$f" 2>/dev/null || echo 0)
               if [ "$s1" -gt 0 ] && [ "$s1" = "$s2" ]; then
                 echo "watchdog: complete daemon dump detected ($f, $s1 bytes) — terminating the run"
@@ -358,6 +366,14 @@ jobs:
         run: |
           find heap-dumps -name '*.hprof' -exec gzip -1 {} \; 2>/dev/null || true
           ls -laR heap-dumps/ || true
+          # Leftover dump segments mean the dump was truncated (e.g. killed mid-write)
+          if ls heap-dumps/daemon/*.p[0-9] >/dev/null 2>&1; then
+            echo "WARNING: truncated heap dump (unmerged segments present)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          # Preserve the Gradle daemon logs for diagnostics (they live in GRADLE_USER_HOME)
+          mkdir -p daemon-logs
+          cp '${{ runner.temp }}'/guh/daemon/*/daemon-*.out.log daemon-logs/ 2>/dev/null || true
+          tar -czf daemon-logs.tar.gz -C daemon-logs . 2>/dev/null || true
           if [ '${{ inputs.dump_models }}' = 'true' ] && [ -n "$(ls -A model-dumps 2>/dev/null)" ]; then
             tar -czf model-dumps.tar.gz -C model-dumps .
             echo "model dump files: $(find model-dumps -type f | wc -l)"
@@ -448,7 +464,7 @@ jobs:
             outcome="failed, no dump"
           fi
           for f in profiler.log summary.md sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties \
-                   results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log model-dumps.tar.gz; do
+                   results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log model-dumps.tar.gz daemon-logs.tar.gz; do
             [ -f "$f" ] && assets+=("$f")
           done
           ide=$(ls -S heap-dumps/ide/*.hprof.gz 2>/dev/null | head -1)
@@ -534,14 +550,17 @@ jobs:
             echo "- Gradle distribution: ${{ inputs.gradle_distribution_url }}"
             echo
           } > model-diff.md
-          only_base=0; only_cand=0; same=0; differ=0
-          : > only-base.txt; : > only-candidate.txt; : > differing.txt
+          only_base=0; only_cand=0; same=0; same_noorder=0; differ=0
+          echo '# (none)' > only-base.txt; echo '# (none)' > only-candidate.txt; echo '# (none)' > differing.txt
           for f in $(cd base && find . -type f | sort); do
             if [ ! -f "candidate/$f" ]; then
               echo "$f" >> only-base.txt; only_base=$((only_base+1)); continue
             fi
             if diff -q <(sort -u "base/$f") <(sort -u "candidate/$f") >/dev/null; then
               same=$((same+1))
+            # secondary metric: identical except the classpathOrder field (field 6)
+            elif diff -q <(sort -u "base/$f" | cut -d'|' -f1-5,7-) <(sort -u "candidate/$f" | cut -d'|' -f1-5,7-) >/dev/null; then
+              same_noorder=$((same_noorder+1))
             else
               echo "$f" >> differing.txt; differ=$((differ+1))
             fi
@@ -553,6 +572,7 @@ jobs:
             echo "## Summary"
             echo
             echo "- identical configurations: **$same**"
+            echo "- identical except classpathOrder values: **$same_noorder**"
             echo "- differing configurations: **$differ**"
             echo "- only in base (candidate OOM'd earlier or resolved less): $only_base"
             echo "- only in candidate: $only_cand"
@@ -565,7 +585,7 @@ jobs:
                 echo
                 echo "### \`$f\`"
                 echo '```diff'
-                diff -u <(sort -u "base/$f") <(sort -u "candidate/$f") | head -60
+                diff -u <(sort -u "base/$f") <(sort -u "candidate/$f") 2>/dev/null | head -60 || true
                 echo '```'
               } >> model-diff.md
             done

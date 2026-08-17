@@ -1,0 +1,75 @@
+
+* Writing results to /home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/results-probe
+
+* Settings
+Project dir: /home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/.
+Output dir: /home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/results-probe
+Profiler: none
+Benchmark: true
+Versions: []
+Gradle User Home: /home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/gradle-user-home
+Targets: default scenarios
+Warm-ups: 0
+Builds: 1
+
+* Inspecting the build using its default Gradle version
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by net.rubygrapefruit.platform.internal.NativeLibraryLoader in an unnamed module (file:/home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/gradle-user-home/wrapper/dists/gradle-9.8.0-bin/2mnsxxzcxjvjjwa48iyow8v2s/gradle-9.8.0-20260816210000+0000/lib/native-platform-0.22-milestone-29.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+
+* Stopping daemons
+
+* Scenarios
+Scenario: Android Studio sync (Gradle daemon OOM repro) using Gradle 9.8.0-20260816210000+0000
+  Gradle 9.8.0-20260816210000+0000 (/home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/gradle-user-home/wrapper/dists/gradle-9.8.0-bin/2mnsxxzcxjvjjwa48iyow8v2s/gradle-9.8.0-20260816210000+0000)
+  Run using: IDE
+  Run: IDE sync
+  Cleanup: do nothing
+  Gradle args: []
+  Build operations trace: false
+  Build changes: []
+  Warm-ups: 0
+  Builds: 1
+
+* Running scenario Android Studio sync (Gradle daemon OOM repro) using Gradle 9.8.0-20260816210000+0000 (scenario 1/1)
+
+* Stopping daemons
+
+* Running measured build #1
+
+
+* Starting Android Studio at /opt/android-studio
+* Start command: /opt/android-studio/bin/studio.sh
+* Additional JVM args:
+  -javaagent:/tmp/ide-agent9415615704955610788.jar=32787,/tmp/instrumentation-support8279718831558831055.jar
+  --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED
+  -Xbootclasspath/a:/tmp/asm1915764944598056576.jar:/tmp/client-protocol13595040499906057598.jar
+  -Xms256m
+  -Xmx2g
+  -XX:+HeapDumpOnOutOfMemoryError
+  -XX:HeapDumpPath=/home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/heap-dumps/ide
+  -XX:HeapDumpGzipLevel=1
+  -Didea.gradle.distributionType=BUNDLED
+  -Dgradle.profiler.startup.port=39915
+  -Dgradle.profiler.port=43699
+  -Didea.plugins.path=/home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/results-probe/studio-sandbox/plugins
+  -Didea.config.path=/home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/results-probe/studio-sandbox/config
+  -Didea.log.path=/home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/results-probe/studio-sandbox/logs
+  -Djava.awt.headless=true
+  -Didea.trust.all.projects=true
+  -Didea.system.path=/home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/results-probe/studio-sandbox/system
+  -Dexternal.system.auto.import.disabled=true
+* Additional JVM args can be found at: /home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/results-probe/studio-sandbox/scenarioOptions/idea.vmoptions
+* IDEA properties:
+* IDEA properties can be found at: /home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/results-probe/studio-sandbox/scenarioOptions/idea.properties
+* Android Studio logs can be found at: /home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/results-probe/studio-sandbox/logs/idea.log
+* Using command line: /opt/android-studio/bin/studio.sh headless-starter /home/olowo/IdeaProjects/GradleExperiments-v2/measure/feature-module-3000/.
+
+* Running sync in Android Studio...
+* Sent sync request
+* Sync has started, waiting for it to complete...
+* Gradle invocation 1 has started, waiting for it to complete...
+* Gradle invocation 1 has completed in: 984991ms
+* Gradle invocation 2 has started, waiting for it to complete...

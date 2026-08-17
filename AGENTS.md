@@ -66,6 +66,11 @@ the app modules themselves.
   call **hangs forever when the daemon OOMs mid-call**. The workflow's watchdog polls
   for a size-stable `heap-dumps/daemon/*.hprof.gz` and kills the profiler tree — keep
   that mechanism intact; without it every run burns the full job timeout.
+  **JDK 25+ writes gzipped heap dumps in parallel segments**: the main `.hprof.gz`
+  holds the header (small and size-stable) while workers write `*.p0`/`*.p1` segments
+  that are merged at the end. A size-stable main file is NOT enough — the watchdog must
+  keep waiting while any `*.p[0-9]` segment exists, or it kills the daemon mid-dump and
+  publishes a header-only file (observed: 14.7 MB "dump" + a 1 GB orphan `.p0`).
 - `warm-ups = 0` requires `--single-shot` (scenario validation fails otherwise).
 - Upstream gradle-profiler waits only 60 s for the IDE plugin to connect; opening 9000
   modules takes longer. Use the patched build from the `patched-profiler` release
