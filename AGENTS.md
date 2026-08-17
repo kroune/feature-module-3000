@@ -73,9 +73,11 @@ the app modules themselves.
 - On CI the IDE must run headless: `GRADLE_PROFILER_OPTS=-Dide.tests.headless=true`.
   Full-GUI Studio under xvfb hangs in project frame creation and the sync never starts.
 - Heap dumps: `-XX:HeapDumpGzipLevel=1` makes the JVM write gzipped hprofs directly
-  (no raw dump on disk — essential on the 14 GB runner SSD). `HeapDumpPath` must point
-  to a **directory** (per-PID filenames); the JVM refuses to overwrite existing files
-  (`O_EXCL`), so FIFO tricks do not work.
+  (no raw dump on disk). Runners have ~100 GB of SSD (the older "14 GB" note here was
+  wrong), so disk pressure is not a concern for builds; keep the gzip setting anyway —
+  it keeps release uploads small (assets are capped at 2 GiB, see below).
+  `HeapDumpPath` must point to a **directory** (per-PID filenames); the JVM refuses to
+  overwrite existing files (`O_EXCL`), so FIFO tricks do not work.
 - GitHub release assets are capped at 2 GiB — the release step splits larger dumps into
   `daemon.hprof.gz.part-*` (reassemble with `cat`). Actions artifact downloads are very
   slow (~0.2 MB/s); releases are the primary distribution channel.
