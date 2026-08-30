@@ -1,6 +1,14 @@
 pluginManagement {
     includeBuild("build-logic")
     repositories {
+        // Optional AGP override for the measure-agp-commits workflow: point at a locally
+        // built AGP maven repo (tools/out/repo) instead of the catalog default. The
+        // version override lives in build-logic/settings.gradle.kts (that's where AGP
+        // actually enters the build classpath).
+        val agpOverrideRepoUrl: String? = providers.gradleProperty("agpOverrideRepoUrl").orNull
+        if (agpOverrideRepoUrl != null) {
+            maven { url = uri(agpOverrideRepoUrl) }
+        }
         google()
         mavenCentral()
         gradlePluginPortal()
