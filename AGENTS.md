@@ -32,6 +32,14 @@ the app modules themselves.
   against both in parallel. Built dists are cached as `gradle-build-<sha12>` release
   assets, so re-measuring a commit skips its ~35 min build. Default daemon heap here
   is `9g` (not 10g) — see the kernel OOM-killer gotcha below for why.
+- `.github/workflows/measure-agp-commits.yml` — AGP-side twin: Gradle distribution fixed
+  for both legs, what differs is AGP. It builds AGP from two `kroune/platform-tools-base`
+  refs (studio-main snapshot vs optimization branch) via a minimal AOSP `repo` checkout +
+  `tools/gradlew :publishAndroidGradleLocal` (cached as `agp-build-<sha12>` releases with
+  the maven repo tarball + build version), then appends `agpOverrideRepoUrl` /
+  `agpOverrideVersion` to gradle.properties before the same sync benchmark (the override
+  is honored by `settings.gradle.kts` + `build-logic/settings.gradle.kts`, defaulting to
+  the catalog 9.2.1 from google()). Releases are `run-agp-<N>-{base,candidate}`.
 - `kroune/heap-report` (separate repo) — the dump viewer + MAT index builder. Both
   benchmark workflows end with a `Trigger MAT index build` step that fires a
   `repository_dispatch` there (`build-indexes` workflow → `idx-<tag>` release with
