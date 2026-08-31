@@ -314,6 +314,15 @@ jobs:
           } >> gradle.properties
           # fail loudly if the override did not land as its own property
           grep -q "^agpOverrideRepoUrl=file://" gradle.properties
+          # build-logic is an INCLUDED BUILD: it does not see the root gradle.properties,
+          # so the version override (which lives in its catalog) must also land in its own
+          # gradle.properties — otherwise both legs silently compile against the catalog AGP
+          {
+            echo
+            echo "agpOverrideRepoUrl=file://$RUNNER_TEMP/agp-repo/repo"
+            echo "agpOverrideVersion=$version"
+          } >> build-logic/gradle.properties
+          grep -q "^agpOverrideVersion=" build-logic/gradle.properties
           echo "AGP override: file://$RUNNER_TEMP/agp-repo/repo @ $version"
 
       - name: Patch gradle.properties (heap cap, dump path, JDK 25 compact headers)
