@@ -16,7 +16,10 @@ studio-sync-oom {
       "-Xmx4g",
       "-XX:+HeapDumpOnOutOfMemoryError",
       "-XX:HeapDumpPath=@HEAP_DUMP_DIR@/ide",
-      "-XX:HeapDumpGzipLevel=1"
+      "-XX:HeapDumpGzipLevel=1",
+      // Headless CI: never show the modal usage-stats consent dialog — it blocks
+      // project open (EDT waits on the dialog, background write actions stall).
+      "-Ddisable.android.analytics.consent.dialog"
     ]
   }
 
