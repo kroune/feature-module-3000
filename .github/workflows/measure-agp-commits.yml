@@ -206,7 +206,7 @@ jobs:
           set -euo pipefail
           [ -d aosp/out/repo ] || { echo "aosp/out/repo missing" >&2; exit 1; }
           # dev build version: BUILD_VERSION's numeric prefix + "-dev" (buildSrc/base/version.gradle)
-          version=$(grep -oP 'BUILD_VERSION = "\K[0-9.]+' aosp/tools/base/base/common/release_version.bzl | head -1)-dev
+          version=$(grep -oP 'BUILD_VERSION = "\K[0-9.]+' aosp/tools/base/common/release_version.bzl | head -1)-dev
           echo "AGP build version: $version"
           echo "$version" > '${{ steps.cached.outputs.version_asset }}'
           tar -czf '${{ steps.cached.outputs.asset }}' -C aosp/out repo
