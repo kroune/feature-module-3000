@@ -305,9 +305,15 @@ jobs:
           version=$(cat "agp-version-$sha12.txt")
           ls "$RUNNER_TEMP/agp-repo/repo/com/android/tools/build/gradle/$version" | head
           {
+            # leading blank line: a missing trailing newline in gradle.properties would
+            # otherwise glue agpOverrideRepoUrl onto the last property and silently
+            # drop the repo override (both legs then resolve the same gmaven AGP)
+            echo
             echo "agpOverrideRepoUrl=file://$RUNNER_TEMP/agp-repo/repo"
             echo "agpOverrideVersion=$version"
           } >> gradle.properties
+          # fail loudly if the override did not land as its own property
+          grep -q "^agpOverrideRepoUrl=file://" gradle.properties
           echo "AGP override: file://$RUNNER_TEMP/agp-repo/repo @ $version"
 
       - name: Patch gradle.properties (heap cap, dump path, JDK 25 compact headers)
