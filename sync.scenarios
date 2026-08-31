@@ -19,7 +19,10 @@ studio-sync-oom {
       "-XX:HeapDumpGzipLevel=1",
       // Headless CI: never show the modal usage-stats consent dialog — it blocks
       // project open (EDT waits on the dialog, background write actions stall).
-      "-Ddisable.android.analytics.consent.dialog=true"
+      "-Ddisable.android.analytics.consent.dialog=true",
+      // The benchmarked AGP is a -dev build newer than any released Studio's
+      // latest supported AGP; skip Studio's forced-upgrade sync rejection.
+      "-Dstudio.skip.agp.upgrade=true"
     ]
   }
 
