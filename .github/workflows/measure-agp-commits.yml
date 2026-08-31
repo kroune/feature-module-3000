@@ -209,8 +209,16 @@ jobs:
           version=$(grep -oP 'BUILD_VERSION = "\K[0-9.]+' aosp/tools/base/common/release_version.bzl | head -1)-dev
           echo "AGP build version: $version"
           echo "$version" > '${{ steps.cached.outputs.version_asset }}'
-          tar -czf '${{ steps.cached.outputs.asset }}' -C aosp/out repo
+          # -h / --dereference: the bazel-produced artifacts (sdk-common, sdklib, lint,
+          # utp, ...) are symlinks into the bazel sandbox in out/repo; archiving them
+          # as links yields a repo full of dangling symlinks on the sync runner.
+          tar -czhf '${{ steps.cached.outputs.asset }}' -C aosp/out repo
           du -sh '${{ steps.cached.outputs.asset }}'
+          # Fail loudly if any symlink survived (they are all dangling off-runner).
+          if find aosp/out/repo -type l | grep -q .; then
+            echo "NOTE: out/repo contains symlinks (dereferenced in the tar):"
+            find aosp/out/repo -type l | head
+          fi
           {
             echo "## AGP built (${{ matrix.name }})"
             echo
