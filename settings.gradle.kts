@@ -2,9 +2,9 @@ pluginManagement {
     includeBuild("build-logic")
     repositories {
         // Optional AGP override for the measure-agp-commits workflow: point at a locally
-        // built AGP maven repo (tools/out/repo) instead of the catalog default. The
-        // version override lives in build-logic/settings.gradle.kts (that's where AGP
-        // actually enters the build classpath).
+        // built AGP maven repo (tools/out/repo) instead of the catalog default. Version
+        // overrides live in build-logic/settings.gradle.kts (build-logic classpath) and in
+        // dependencyResolutionManagement below (module plugin aliases).
         val agpOverrideRepoUrl: String? = providers.gradleProperty("agpOverrideRepoUrl").orNull
         if (agpOverrideRepoUrl != null) {
             maven { url = uri(agpOverrideRepoUrl) }
@@ -20,8 +20,25 @@ rootProject.name = "androidFeature_sliced3000modules"
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        // AGP override repo is needed here too: AGP resolves aapt2 through a detached
+        // configuration using the project repositories, not pluginManagement ones.
+        val agpOverrideRepoUrl: String? = providers.gradleProperty("agpOverrideRepoUrl").orNull
+        if (agpOverrideRepoUrl != null) {
+            maven { url = uri(agpOverrideRepoUrl) }
+        }
         google()
         mavenCentral()
+    }
+    // The root build script declares the AGP plugins via catalog aliases (apply false),
+    // so the plugin version comes from THIS build's catalog, not from build-logic's.
+    // Without this override the modules silently use the catalog-pinned AGP.
+    val agpOverrideVersion: String? = providers.gradleProperty("agpOverrideVersion").orNull
+    if (agpOverrideVersion != null) {
+        versionCatalogs {
+            create("libs") {
+                version("agp", agpOverrideVersion)
+            }
+        }
     }
 }
 include (":foundation:foundation-0")
