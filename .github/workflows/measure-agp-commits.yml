@@ -143,7 +143,8 @@ jobs:
           curl -sSL https://storage.googleapis.com/git-repo-downloads/repo > "$RUNNER_TEMP/repo"
           chmod +x "$RUNNER_TEMP/repo"
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-          repo version
+          # $GITHUB_PATH only takes effect in later steps; use the full path here.
+          "$RUNNER_TEMP/repo" version
 
       # Minimal studio-main checkout for building AGP: the gradle build resolves its
       # dependencies exclusively from the checked-in offline maven repo
