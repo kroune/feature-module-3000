@@ -412,6 +412,12 @@ jobs:
           cp gradle-user-home/daemon/*/daemon-*.out.log daemon-logs/ 2>/dev/null || true
           cp '${{ runner.temp }}'/guh/daemon/*/daemon-*.out.log daemon-logs/ 2>/dev/null || true
           tar -czf daemon-logs.tar.gz -C daemon-logs . 2>/dev/null || true
+          # IDE thread dumps ("Cannot execute background write action" warnings point here)
+          # — the prime diagnostic when Studio hangs during project open.
+          if [ -d results/studio-sandbox/system ]; then
+            find results/studio-sandbox/system -maxdepth 1 -type d -name 'threadDumps*' \
+              -exec tar -czf ide-thread-dumps.tar.gz {} + 2>/dev/null || true
+          fi
           du -sh results 2>/dev/null || true
           df -h /; free -h
 
@@ -433,6 +439,7 @@ jobs:
             results/*.log
             results/**/log/**
             results/**/logs/**
+            ide-thread-dumps.tar.gz
 
       - name: Job summary
         if: always()
@@ -495,7 +502,7 @@ jobs:
             outcome="failed, no dump"
           fi
           for f in profiler.log summary.md sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties \
-                   results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log daemon-logs.tar.gz; do
+                   results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log daemon-logs.tar.gz ide-thread-dumps.tar.gz; do
             [ -f "$f" ] && assets+=("$f")
           done
           ide=$(ls -S heap-dumps/ide/*.hprof.gz 2>/dev/null | head -1)
