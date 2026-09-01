@@ -333,26 +333,34 @@ jobs:
             fi
           } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
 
-      - name: Configure AWS credentials
+      # shark strip-hprof zeroes all primitive arrays, which gzips far smaller than the
+      # raw dump. The stripped variant is what MAT indexes are built from (strip rewrites
+      # the file, so indexes built from the raw dump are useless for it).
+      - name: Strip daemon heap dump (shark)
         if: always()
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Upload to S3
-        if: always()
-        continue-on-error: true
         run: |
-          PREFIX="s3://${{ secrets.S3_BUCKET }}/sync-benchmark-dumps-${{ github.run_number }}-${{ matrix.name }}"
-          for file_name in heap-dumps results; do
-            [ -d "$file_name" ] && aws s3 sync "$file_name/" "$PREFIX/$file_name/" --quiet
-          done
-          for file_name in profiler.log sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties; do
-            [ -f "$file_name" ] && aws s3 cp "$file_name" "$PREFIX/$file_name" --quiet
-          done
-          exit 0
+          dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+          if [ -z "$dump" ]; then
+            echo "no daemon dump — skipping strip-hprof"
+            exit 0
+          fi
+          if ls heap-dumps/daemon/*.p[0-9] >/dev/null 2>&1; then
+            echo "unmerged dump segments present (truncated dump) — skipping strip-hprof"
+            exit 0
+          fi
+          curl -sL -o shark.zip https://github.com/square/leakcanary/releases/download/v2.14/shark-cli-2.14.zip
+          mkdir -p "$RUNNER_TEMP/shark" && unzip -q shark.zip -d "$RUNNER_TEMP/shark" && rm shark.zip
+          SHARK=$(find "$RUNNER_TEMP/shark" -type f -name shark-cli -path "*/bin/*" | head -1)
+          java -version
+          # work on a copy: the raw dump decompresses to ~18 GB and strip rewrites it
+          cp "$dump" daemon.hprof.gz
+          gzip -d daemon.hprof.gz
+          "$SHARK" --hprof daemon.hprof strip-hprof
+          # strip-hprof writes daemon-stripped.hprof next to the input; normalize the name
+          mv daemon-stripped.hprof daemon.stripped.hprof
+          rm -f daemon.hprof
+          gzip -1 daemon.stripped.hprof
+          ls -lh daemon.stripped.hprof.gz
 
       - name: Upload artifacts
         if: always()
@@ -409,6 +417,25 @@ jobs:
           else
             outcome="failed, no dump"
           fi
+          # shark-stripped variant (primitive arrays zeroed): heap-report builds its MAT
+          # indexes from this file. Same 2 GiB split rules as the full dump.
+          if [ -f daemon.stripped.hprof.gz ]; then
+            ssize=$(stat -c%s daemon.stripped.hprof.gz)
+            if [ "$ssize" -gt 2000000000 ]; then
+              split -b 1900m daemon.stripped.hprof.gz daemon.stripped.hprof.gz.part-
+              # no rm: the S3 step uploads the original as a single object (no splitting on S3)
+              assets+=(daemon.stripped.hprof.gz.part-*)
+              {
+                echo
+                echo "**Note:** \`daemon.stripped.hprof.gz\` exceeds the 2 GiB release-asset limit and is split into parts. Reassemble with:"
+                echo '```'
+                echo "cat daemon.stripped.hprof.gz.part-* > daemon.stripped.hprof.gz"
+                echo '```'
+              } >> summary.md
+            else
+              assets+=(daemon.stripped.hprof.gz)
+            fi
+          fi
           for f in profiler.log summary.md sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties \
                    results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log; do
             [ -f "$f" ] && assets+=("$f")
@@ -421,6 +448,42 @@ jobs:
             --notes-file summary.md \
             "${assets[@]}"
           echo "**Results published: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$tag**" >> "$GITHUB_STEP_SUMMARY"
+
+      # Fast lane for local downloads (GitHub throttles them): mirror everything to the
+      # private SeaweedFS S3 except the FULL daemon dump (GitHub-only by decision).
+      # Layout: s3://$S3_BUCKET/<release-tag>/<asset>. Never fails the job.
+      - name: Upload to S3 (non-fatal)
+        if: always()
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          tag="run-${{ github.run_number }}-${{ matrix.name }}"
+          prefix="s3://$S3_BUCKET/$tag"
+          # the CF proxy in front of the S3 endpoint is slow per-connection — parallel multipart
+          aws configure set default.s3.max_concurrent_requests 16
+          aws configure set default.s3.multipart_threshold 16MB
+          aws configure set default.s3.multipart_chunksize 16MB
+          S3="aws s3 cp --endpoint-url https://s3.kroune.tech"
+          if [ -f daemon.stripped.hprof.gz ]; then
+            $S3 daemon.stripped.hprof.gz "$prefix/daemon.stripped.hprof.gz"
+          else
+            echo "no stripped dump — skipping its upload"
+          fi
+          ide=$(ls -S heap-dumps/ide/*.hprof.gz 2>/dev/null | head -1)
+          [ -n "$ide" ] && cp "$ide" ide.hprof.gz && $S3 ide.hprof.gz "$prefix/ide.hprof.gz"
+          existing=()
+          for f in profiler.log summary.md sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties \
+                   results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log; do
+            [ -f "$f" ] && existing+=("$f")
+          done
+          if [ ${#existing[@]} -gt 0 ]; then
+            tar -czf logs.tar.gz "${existing[@]}"
+            $S3 logs.tar.gz "$prefix/logs.tar.gz"
+          fi
 
       # Kick off MAT index building in the heap-report repo; a no-op when the PAT
       # secret is absent or no daemon dump was produced.

@@ -32,6 +32,14 @@ the app modules themselves.
   against both in parallel. Built dists are cached as `gradle-build-<sha12>` release
   assets, so re-measuring a commit skips its ~35 min build. Default daemon heap here
   is `9g` (not 10g) — see the kernel OOM-killer gotcha below for why.
+- `.github/workflows/measure-idea-commits.yml` — IDE-side twin of measure-commits: the
+  Gradle distribution is fixed for both legs and what differs is the IDE — it builds the
+  Gradle tooling-extension jars from two IntelliJ refs (`kroune/intellij-community`
+  branches, e.g. `sync-baseline` vs `sync-modern-dep-resolver`) via Bazel (cached as
+  `idea-build-<sha12>` releases) and overlays them into Android Studio before the same
+  sync benchmark. Releases are `run-idea-<N>-{base,candidate}` (+ `-model-diff` with
+  `dump_models=true`). The tooling extension runs inside the daemon, so the OOM signal
+  is still the daemon heap dump.
 - `.github/workflows/measure-agp-commits.yml` — AGP-side twin: Gradle distribution fixed
   for both legs, what differs is AGP. It builds AGP from two `kroune/platform-tools-base`
   refs (studio-main snapshot vs optimization branch) via a minimal AOSP `repo` checkout +
@@ -42,12 +50,23 @@ the app modules themselves.
   the second append both legs silently compile build-logic against the catalog AGP) before
   the same sync benchmark (the override is honored by `settings.gradle.kts` +
   `build-logic/settings.gradle.kts`, defaulting to the catalog 9.2.1 from google()). Releases are `run-agp-<N>-{base,candidate}`.
-- `kroune/heap-report` (separate repo) — the dump viewer + MAT index builder. Both
+- `kroune/heap-report` (separate repo) — the dump viewer + MAT index builder. All
   benchmark workflows end with a `Trigger MAT index build` step that fires a
   `repository_dispatch` there (`build-indexes` workflow → `idx-<tag>` release with
   zstd-compressed MAT indexes). The step is a silent no-op unless the
   **`HEAP_REPORT_PAT`** secret is set on this repo (PAT with Contents-RW on
   heap-report — GITHUB_TOKEN can't dispatch cross-repo) and a daemon dump exists.
+- S3 publishing (all 4 benchmark workflows, per release tag): at capture time the daemon
+  dump is also run through **shark-cli 2.14 `strip-hprof`** (zeroes primitive arrays →
+  much smaller gzip) producing `daemon.stripped.hprof.gz`, which goes to BOTH the GitHub
+  release (heap-report's build-indexes CI downloads it from there and builds indexes from
+  the STRIPPED variant — strip rewrites offsets) and the private SeaweedFS S3
+  (`--endpoint-url https://s3.kroune.tech`, bucket from the `S3_BUCKET` secret, layout
+  `s3://<bucket>/<release-tag>/<asset>`, single objects — no 2 GiB splitting on S3).
+  S3 also gets the logs (`logs.tar.gz`) and the IDE dump; the FULL daemon dump is
+  GitHub-only. S3 steps are `continue-on-error: true` — the release stays the source of
+  truth. Secrets: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` /
+  `S3_BUCKET`; aws-cli v2 is preinstalled on ubuntu-latest.
 
 ## Commands
 
@@ -55,12 +74,17 @@ the app modules themselves.
   `-f base_repo=gradle/gradle -f base_ref=<sha>`
   `-f candidate_repo=kroune/gradle-fork -f candidate_ref=<branch>`
   (result releases: `run-<N>-base` / `run-<N>-candidate`).
-- AI-driven branch benchmark: the `/measure-oom` project skill
-  (`.kimi-code/skills/measure-oom/SKILL.md`) takes a fork-branch link, dispatches
-  measure-commits with base = merge-base against `gradle/gradle` master, watches the run
-  (plus a recurring 30-min stuck-check cron), retries infra failures (max 2), and walks
-  `daemon_xmx` down 1g at a time (floor 3g) until the candidate OOMs. Explicit user
-  invocation only — the model must never dispatch a benchmark on its own.
+- AI-driven branch benchmark: two SPLIT project skills, one per workflow, both
+  **manual-only** (`disableModelInvocation: true` — the model must never dispatch a
+  benchmark on its own, the user triggers every run):
+  - `/measure-oom` (`.kimi-code/skills/measure-oom/SKILL.md`) — Gradle-side: takes a
+    gradle-fork branch link, dispatches measure-commits with base = merge-base against
+    `gradle/gradle` master.
+  - `/measure-idea-oom` (`.kimi-code/skills/measure-idea-oom/SKILL.md`) — IDE-side:
+    takes an intellij-community branch link, dispatches measure-idea-commits with
+    base = the workflow's default baseline ref (`sync-baseline`).
+  Both watch the run (plus a recurring 30-min stuck-check cron), retry infra failures
+  (max 2), and walk `daemon_xmx` down 1g at a time (floor 3g) until the candidate OOMs.
 - Trigger a benchmark run: `gh workflow run sync-benchmark.yml`
   (inputs: `gradle_distribution_url`, `daemon_xmx`, `studio_url`, `gradle_profiler_url`;
   use `-f daemon_xmx=2g` for a ~12 min smoke run).
@@ -89,12 +113,17 @@ the app modules themselves.
   Full-GUI Studio under xvfb hangs in project frame creation and the sync never starts.
 - Heap dumps: `-XX:HeapDumpGzipLevel=1` makes the JVM write gzipped hprofs directly
   (no raw dump on disk). Runners have ~100 GB of SSD (the older "14 GB" note here was
-  wrong), so disk pressure is not a concern for builds; keep the gzip setting anyway —
+  wrong), so disk pressure is not a concern for builds — the `Free disk space` steps
+  (dotnet/boost/ghc/swift/CodeQL + docker prune) were removed from all workflows; the
+  shark strip still needs ~40 GB peak (18 GB decompressed dump + stripped copy).
+  Keep the gzip setting anyway —
   it keeps release uploads small (assets are capped at 2 GiB, see below).
   `HeapDumpPath` must point to a **directory** (per-PID filenames); the JVM refuses to
   overwrite existing files (`O_EXCL`), so FIFO tricks do not work.
 - GitHub release assets are capped at 2 GiB — the release step splits larger dumps into
-  `daemon.hprof.gz.part-*` (reassemble with `cat`). Actions artifact downloads are very
+  `daemon.hprof.gz.part-*` (reassemble with `cat`; same rules for
+  `daemon.stripped.hprof.gz`, though gzipped-stripped is ~1-1.5 GB so it shouldn't
+  trigger). Actions artifact downloads are very
   slow (~0.2 MB/s); releases are the primary distribution channel.
 - The runner is 16 GB: keep daemon `-Xmx` + IDE `-Xmx` low enough that the *JVM* throws
   OOM before the kernel OOM-killer fires (kernel kills write no dump). If `-Xmx` is too
