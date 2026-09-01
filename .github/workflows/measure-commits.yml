@@ -111,15 +111,6 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Free disk space
-        if: steps.cached.outputs.exists != 'true'
-        run: |
-          echo "== before =="; df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/share/boost /opt/ghc /usr/share/swift \
-            "$AGENT_TOOLSDIRECTORY/CodeQL" || true
-          docker system prune -af || true
-          echo "== after =="; df -h /
-
       # Gradle's own build requires JDK 25 (see its CONTRIBUTING.md); 17/21 are extra
       # toolchains in case some module pins an older language level.
       - uses: actions/setup-java@v4
@@ -174,7 +165,7 @@ jobs:
   # comes from the build job above, and the result release tag is suffixed with the
   # matrix leg name so base/candidate don't collide.
   sync:
-    needs: [resolve, build]
+    needs: [ resolve, build ]
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
@@ -313,25 +304,6 @@ jobs:
           du -sh results 2>/dev/null || true
           df -h /; free -h
 
-      - name: Upload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sync-benchmark-dumps-${{ github.run_number }}-${{ matrix.name }}
-          if-no-files-found: warn
-          retention-days: 7
-          path: |
-            heap-dumps/
-            profiler.log
-            sync.scenarios.ci
-            gradle.properties
-            gradle/wrapper/gradle-wrapper.properties
-            results/*.csv
-            results/*.html
-            results/*.log
-            results/**/log/**
-            results/**/logs/**
-
       - name: Job summary
         if: always()
         env:
@@ -360,6 +332,45 @@ jobs:
               echo "**No daemon heap dump produced**"
             fi
           } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
+
+      - name: Configure AWS credentials
+        if: always()
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Upload to S3
+        if: always()
+        continue-on-error: true
+        run: |
+          PREFIX="s3://${{ secrets.S3_BUCKET }}/sync-benchmark-dumps-${{ github.run_number }}-${{ matrix.name }}"
+          for file_name in heap-dumps results; do
+            [ -d "$file_name" ] && aws s3 sync "$file_name/" "$PREFIX/$file_name/" --quiet
+          done
+          for file_name in profiler.log sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties; do
+            [ -f "$file_name" ] && aws s3 cp "$file_name" "$PREFIX/$file_name" --quiet
+          done
+          exit 0
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-benchmark-dumps-${{ github.run_number }}-${{ matrix.name }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            heap-dumps/
+            profiler.log
+            sync.scenarios.ci
+            gradle.properties
+            gradle/wrapper/gradle-wrapper.properties
+            results/*.csv
+            results/*.html
+            results/*.log
+            results/**/log/**
+            results/**/logs/**
 
       # Results go to a release (not just artifacts): release assets have fast,
       # stable, publicly accessible download URLs — Actions artifact downloads are slow.
