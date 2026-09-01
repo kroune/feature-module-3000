@@ -190,14 +190,6 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Free disk space
-        run: |
-          echo "== before =="; df -h /; free -h
-          sudo rm -rf /usr/share/dotnet /usr/local/share/boost /opt/ghc /usr/share/swift \
-            "$AGENT_TOOLSDIRECTORY/CodeQL" || true
-          docker system prune -af || true
-          echo "== after =="; df -h /
-
       # Compressed RAM swap: zero disk cost, keeps the kernel OOM-killer away from the
       # daemon so the JVM itself throws OutOfMemoryError (which is what writes the dump).
       - name: Add zram swap
@@ -240,7 +232,7 @@ jobs:
           mkdir -p heap-dumps/daemon heap-dumps/kotlin
           sed -i -E "/^org.gradle.jvmargs=/ s|-Xmx[0-9]+[gGmM]|-Xmx$XMX|" gradle.properties
           sed -i -E "/^org.gradle.jvmargs=/ s|-Xms[0-9]+[gGmM]|-Xms$XMX|" gradle.properties
-          sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/daemon -XX:HeapDumpGzipLevel=1 -XX:+UseCompactObjectHeaders|" gradle.properties
+          sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/daemon -XX:HeapDumpGzipLevel=1 -XX:+UseCompactObjectHeaders -XX:GCTimeLimit=10 -XX:GCHeapFreeLimit=90 -XX:+UseParallelGC|" gradle.properties
           sed -i "/^kotlin.daemon.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/kotlin -XX:HeapDumpGzipLevel=1|" gradle.properties
           cat gradle.properties
 
