@@ -66,7 +66,11 @@ the app modules themselves.
   S3 also gets the logs (`logs.tar.gz`) and the IDE dump; the FULL daemon dump is
   GitHub-only. S3 steps are `continue-on-error: true` — the release stays the source of
   truth. Secrets: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` /
-  `S3_BUCKET`; aws-cli v2 is preinstalled on ubuntu-latest.
+  `S3_BUCKET`; aws-cli v2 is preinstalled on ubuntu-latest. Raw shark output is
+  MAT-incompatible (it emits HEAP_DUMP+HEAP_DUMP_END, which MAT's Pass1Parser
+  counts as 2 snapshots and refuses to index) — the strip step therefore runs
+  `tools/patch_stripped_hprof.py`, which rewrites the 0x0C tag byte to
+  HEAP_DUMP_SEGMENT (0x1C) in place.
 
 ## Commands
 

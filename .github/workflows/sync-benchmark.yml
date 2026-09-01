@@ -229,6 +229,9 @@ jobs:
           "$SHARK" --hprof daemon.hprof strip-hprof
           # strip-hprof writes daemon-stripped.hprof next to the input; normalize the name
           mv daemon-stripped.hprof daemon.stripped.hprof
+          # MAT counts HEAP_DUMP(0x0C)+HEAP_DUMP_END as 2 snapshots and refuses to
+          # parse shark output (segments+END = 1) — patch the tag byte in place
+          python3 tools/patch_stripped_hprof.py daemon.stripped.hprof
           rm -f daemon.hprof
           gzip -1 daemon.stripped.hprof
           ls -lh daemon.stripped.hprof.gz
