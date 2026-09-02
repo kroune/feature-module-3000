@@ -322,7 +322,7 @@ jobs:
           aws configure set default.s3.max_concurrent_requests 16
           aws configure set default.s3.multipart_threshold 16MB
           aws configure set default.s3.multipart_chunksize 16MB
-          S3="aws s3 cp --endpoint-url https://s3.kroune.tech"
+          S3="bash tools/s3_upload.sh"
           if [ -f daemon.stripped.hprof.gz ]; then
             $S3 daemon.stripped.hprof.gz "$prefix/daemon.stripped.hprof.gz"
           else
