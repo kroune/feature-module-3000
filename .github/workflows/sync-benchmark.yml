@@ -277,7 +277,7 @@ jobs:
             ssize=$(stat -c%s daemon.stripped.hprof.gz)
             if [ "$ssize" -gt 2000000000 ]; then
               split -b 1900m daemon.stripped.hprof.gz daemon.stripped.hprof.gz.part-
-              # no rm: the S3 step uploads the original as a single object (no splitting on S3)
+              rm daemon.stripped.hprof.gz  # the upload-s3 job re-downloads + reassembles the parts
               assets+=(daemon.stripped.hprof.gz.part-*)
               {
                 echo
@@ -303,10 +303,12 @@ jobs:
             "${assets[@]}"
           echo "**Results published: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$tag**" >> "$GITHUB_STEP_SUMMARY"
 
-      # Fast lane for local downloads (GitHub throttles them): mirror everything to the
-      # private SeaweedFS S3 except the FULL daemon dump (GitHub-only by decision).
+      # Fast lane for local downloads (GitHub throttles them): mirror the tiny logs
+      # bundle to the private SeaweedFS S3. The multi-GB dumps are uploaded by the
+      # upload-s3 job below — concurrent multi-GB multipart uploads reliably starve
+      # the small SeaweedFS/Cloudflare lane (see measure-commits.yml run-25/26).
       # Layout: s3://$S3_BUCKET/<release-tag>/<asset>. Never fails the job.
-      - name: Upload to S3 (non-fatal)
+      - name: Upload logs to S3 (non-fatal)
         if: always()
         continue-on-error: true
         env:
@@ -318,18 +320,7 @@ jobs:
         run: |
           tag="run-${{ github.run_number }}"
           prefix="s3://$S3_BUCKET/$tag"
-          # the CF proxy in front of the S3 endpoint is slow per-connection — parallel multipart
-          aws configure set default.s3.max_concurrent_requests 16
-          aws configure set default.s3.multipart_threshold 16MB
-          aws configure set default.s3.multipart_chunksize 16MB
           S3="bash tools/s3_upload.sh"
-          if [ -f daemon.stripped.hprof.gz ]; then
-            $S3 daemon.stripped.hprof.gz "$prefix/daemon.stripped.hprof.gz"
-          else
-            echo "no stripped dump — skipping its upload"
-          fi
-          ide=$(ls -S heap-dumps/ide/*.hprof.gz 2>/dev/null | head -1)
-          [ -n "$ide" ] && cp "$ide" ide.hprof.gz && $S3 ide.hprof.gz "$prefix/ide.hprof.gz"
           existing=()
           for f in profiler.log summary.md sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties \
                    results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log; do
@@ -377,3 +368,69 @@ jobs:
           fi
           echo "FAIL: profiler errored and no daemon dump was captured."
           exit 1
+
+  # Multi-GB S3 uploads (stripped daemon dump, IDE dump) run HERE, after the sync
+  # job: concurrent multi-GB multipart uploads reliably starve the small
+  # SeaweedFS/Cloudflare lane (see measure-commits.yml run-25/26, where the base
+  # leg failed all three full-file attempts while candidate was uploading). The
+  # repo-wide job concurrency group serializes these uploads across workflows too.
+  # Assets are re-downloaded from the already-published GitHub release (the source
+  # of truth); never fails the run.
+  upload-s3:
+    needs: sync
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    concurrency:
+      group: seaweedfs-s3-upload
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4 # tools/s3_upload.sh
+
+      - name: Upload large artifacts to S3 (non-fatal)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_MAX_ATTEMPTS: "10"  # transient 503s under multipart load
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          tag="run-${{ github.run_number }}"
+          prefix="s3://$S3_BUCKET/$tag"
+          if ! gh release view "$tag" -R '${{ github.repository }}' >/dev/null 2>&1; then
+            echo "::warning::release $tag missing — nothing to mirror to S3"
+            exit 0
+          fi
+          # the CF proxy in front of the S3 endpoint is slow per-connection — parallel multipart
+          aws configure set default.s3.max_concurrent_requests 16
+          aws configure set default.s3.multipart_threshold 16MB
+          aws configure set default.s3.multipart_chunksize 16MB
+          mkdir -p dl && cd dl
+          gh release view "$tag" -R '${{ github.repository }}' --json assets --jq '.assets[].name' > assets.txt
+          # the stripped dump exceeds the 2 GiB asset cap, so on the release it is
+          # usually split into parts (split suffixes sort lexicographically)
+          if grep -qx 'daemon.stripped.hprof.gz' assets.txt; then
+            gh release download "$tag" -R '${{ github.repository }}' -p 'daemon.stripped.hprof.gz' --clobber
+          elif grep -q '^daemon\.stripped\.hprof\.gz\.part-' assets.txt; then
+            grep '^daemon\.stripped\.hprof\.gz\.part-' assets.txt \
+              | xargs -P4 -n1 -I{} gh release download "$tag" -R '${{ github.repository }}' -p {} --clobber
+            cat daemon.stripped.hprof.gz.part-* > daemon.stripped.hprof.gz
+            rm daemon.stripped.hprof.gz.part-*
+          fi
+          if grep -qx 'ide.hprof.gz' assets.txt; then
+            gh release download "$tag" -R '${{ github.repository }}' -p 'ide.hprof.gz' --clobber
+          fi
+          S3="bash ../tools/s3_upload.sh"
+          if [ -f daemon.stripped.hprof.gz ]; then
+            $S3 daemon.stripped.hprof.gz "$prefix/daemon.stripped.hprof.gz"
+          else
+            echo "no stripped dump on release $tag — skipping its upload"
+          fi
+          if [ -f ide.hprof.gz ]; then
+            $S3 ide.hprof.gz "$prefix/ide.hprof.gz"
+          else
+            echo "no IDE dump on release $tag — skipping its upload"
+          fi

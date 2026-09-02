@@ -65,7 +65,16 @@ the app modules themselves.
   (`--endpoint-url https://s3.kroune.tech`, bucket from the `S3_BUCKET` secret, layout
   `s3://<bucket>/<release-tag>/<asset>`, single objects — no 2 GiB splitting on S3).
   S3 also gets the logs (`logs.tar.gz`) and the IDE dump; the FULL daemon dump is
-  GitHub-only. Every object goes through `tools/s3_upload.sh`: aws-cli's default
+  GitHub-only. Small artifacts (logs) upload from the matrix job itself; the
+  multi-GB dumps (`daemon.stripped.hprof.gz`, `ide.hprof.gz`) upload from a final
+  **`upload-s3` job** (`needs: sync`, `if: always()`, repo-wide concurrency group
+  `seaweedfs-s3-upload`) that re-downloads them from the published GitHub release
+  (reassembling `daemon.stripped.hprof.gz.part-*` when split) and uploads ONE file
+  at a time — concurrent matrix legs uploading multi-GB files at once reliably
+  starve the small SeaweedFS/Cloudflare lane (run-25/26: the base leg failed all
+  three full-file attempts while candidate was uploading, and candidate only
+  succeeded once base had stopped). Every object goes through `tools/s3_upload.sh`:
+  aws-cli's default
   CRC64 trailer checksums are disabled (`when_required` — SeaweedFS/Cloudflare can
   report multipart completion success but leave no object), then up to 3 attempts with
   HEAD size verification polled briefly after each one — aws-cli has returned 0 for a
