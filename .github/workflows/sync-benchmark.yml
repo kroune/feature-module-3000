@@ -125,6 +125,14 @@ jobs:
           while kill -0 $PROF 2>/dev/null; do
             f=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
             if [ -n "$f" ]; then
+              # JDK 25+ writes gzipped heap dumps in parallel segments: the main file
+              # holds the header (small and size-stable) while workers write *.p0/*.p1/...
+              # segments that are merged at the end. A stable main file with segments
+              # present means the dump is still in progress — keep waiting.
+              if ls heap-dumps/daemon/*.p[0-9] >/dev/null 2>&1; then
+                sleep 30
+                continue
+              fi
               s1=$(stat -c%s "$f"); sleep 30; s2=$(stat -c%s "$f" 2>/dev/null || echo 0)
               if [ "$s1" -gt 0 ] && [ "$s1" = "$s2" ]; then
                 echo "watchdog: complete daemon dump detected ($f, $s1 bytes) — terminating the run"
