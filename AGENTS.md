@@ -65,9 +65,11 @@ the app modules themselves.
   (`--endpoint-url https://s3.kroune.tech`, bucket from the `S3_BUCKET` secret, layout
   `s3://<bucket>/<release-tag>/<asset>`, single objects — no 2 GiB splitting on S3).
   S3 also gets the logs (`logs.tar.gz`) and the IDE dump; the FULL daemon dump is
-  GitHub-only. Every object goes through `tools/s3_upload.sh`: up to 3 attempts, then
-  HEAD verification against the local size — aws-cli has returned 0 for a truncated
-  multipart upload, so exit status alone is not trusted. S3 steps are
+  GitHub-only. Every object goes through `tools/s3_upload.sh`: aws-cli's default
+  CRC64 trailer checksums are disabled (`when_required` — SeaweedFS/Cloudflare can
+  report multipart completion success but leave no object), then up to 3 attempts with
+  HEAD size verification polled briefly after each one — aws-cli has returned 0 for a
+  truncated multipart upload, so exit status alone is not trusted. S3 steps are
   `continue-on-error: true` — a failed upload turns the step red but the release stays
   the source of truth. Secrets: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` /
   `S3_BUCKET`; aws-cli v2 is preinstalled on ubuntu-latest. (shark-cli strip-hprof is
