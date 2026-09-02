@@ -333,34 +333,25 @@ jobs:
             fi
           } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
 
-      # shark strip-hprof zeroes all primitive arrays, which gzips far smaller than the
-      # raw dump. The stripped variant is what MAT indexes are built from (strip rewrites
-      # the file, so indexes built from the raw dump are useless for it).
-      - name: Strip daemon heap dump (shark)
+      # tools/strip_hprof.py zeroes all primitive array contents IN PLACE (same byte
+      # count, same offsets — MAT indexes stay valid for both variants), which gzips far
+      # smaller. (shark-cli strip-hprof is unusable here: it buffers the whole heap run
+      # in memory and int32-overflows the record length past 2 GiB.)
+      - name: Strip daemon heap dump
         if: always()
         run: |
           dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
           if [ -z "$dump" ]; then
-            echo "no daemon dump — skipping strip-hprof"
+            echo "no daemon dump — skipping strip"
             exit 0
           fi
           if ls heap-dumps/daemon/*.p[0-9] >/dev/null 2>&1; then
-            echo "unmerged dump segments present (truncated dump) — skipping strip-hprof"
+            echo "unmerged dump segments present (truncated dump) — skipping strip"
             exit 0
           fi
-          curl -sL -o shark.zip https://github.com/square/leakcanary/releases/download/v2.14/shark-cli-2.14.zip
-          mkdir -p "$RUNNER_TEMP/shark" && unzip -q shark.zip -d "$RUNNER_TEMP/shark" && rm shark.zip
-          SHARK=$(find "$RUNNER_TEMP/shark" -type f -name shark-cli -path "*/bin/*" | head -1)
-          java -version
-          # work on a copy: the raw dump decompresses to ~18 GB and strip rewrites it
-          cp "$dump" daemon.hprof.gz
-          gzip -d daemon.hprof.gz
-          "$SHARK" --hprof daemon.hprof strip-hprof
-          # strip-hprof writes daemon-stripped.hprof next to the input; normalize the name
-          mv daemon-stripped.hprof daemon.stripped.hprof
-          # MAT counts HEAP_DUMP(0x0C)+HEAP_DUMP_END as 2 snapshots and refuses to
-          # parse shark output (segments+END = 1) — patch the tag byte in place
-          python3 tools/patch_stripped_hprof.py daemon.stripped.hprof
+          # the raw dump decompresses to ~18 GB; the stripper streams it (low memory)
+          gzip -dc "$dump" > daemon.hprof
+          python3 tools/strip_hprof.py daemon.hprof daemon.stripped.hprof
           rm -f daemon.hprof
           gzip -1 daemon.stripped.hprof
           ls -lh daemon.stripped.hprof.gz
@@ -420,7 +411,7 @@ jobs:
           else
             outcome="failed, no dump"
           fi
-          # shark-stripped variant (primitive arrays zeroed): heap-report builds its MAT
+          # stripped variant (primitive arrays zeroed): heap-report builds its MAT
           # indexes from this file. Same 2 GiB split rules as the full dump.
           if [ -f daemon.stripped.hprof.gz ]; then
             ssize=$(stat -c%s daemon.stripped.hprof.gz)

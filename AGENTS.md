@@ -57,20 +57,20 @@ the app modules themselves.
   **`HEAP_REPORT_PAT`** secret is set on this repo (PAT with Contents-RW on
   heap-report — GITHUB_TOKEN can't dispatch cross-repo) and a daemon dump exists.
 - S3 publishing (all 4 benchmark workflows, per release tag): at capture time the daemon
-  dump is also run through **shark-cli 2.14 `strip-hprof`** (zeroes primitive arrays →
-  much smaller gzip) producing `daemon.stripped.hprof.gz`, which goes to BOTH the GitHub
-  release (heap-report's build-indexes CI downloads it from there and builds indexes from
-  the STRIPPED variant — strip rewrites offsets) and the private SeaweedFS S3
+  dump is also run through **`tools/strip_hprof.py`** (zeroes primitive array contents
+  IN PLACE — same byte count, same offsets, so MAT parses it identically and prebuilt
+  indexes stay valid for both variants; ~25% smaller gzip) producing
+  `daemon.stripped.hprof.gz`, which goes to BOTH the GitHub release (heap-report's
+  build-indexes CI downloads and parses it from there) and the private SeaweedFS S3
   (`--endpoint-url https://s3.kroune.tech`, bucket from the `S3_BUCKET` secret, layout
   `s3://<bucket>/<release-tag>/<asset>`, single objects — no 2 GiB splitting on S3).
   S3 also gets the logs (`logs.tar.gz`) and the IDE dump; the FULL daemon dump is
   GitHub-only. S3 steps are `continue-on-error: true` — the release stays the source of
   truth. Secrets: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` /
-  `S3_BUCKET`; aws-cli v2 is preinstalled on ubuntu-latest. Raw shark output is
-  MAT-incompatible (it emits HEAP_DUMP+HEAP_DUMP_END, which MAT's Pass1Parser
-  counts as 2 snapshots and refuses to index) — the strip step therefore runs
-  `tools/patch_stripped_hprof.py`, which rewrites the 0x0C tag byte to
-  HEAP_DUMP_SEGMENT (0x1C) in place.
+  `S3_BUCKET`; aws-cli v2 is preinstalled on ubuntu-latest. (shark-cli strip-hprof is
+  NOT usable for this: it buffers each heap-dump run in memory and int32-overflows the
+  record length past 2 GiB, and its HEAP_DUMP+HEAP_DUMP_END output is counted as two
+  snapshots by MAT.)
 
 ## Commands
 
