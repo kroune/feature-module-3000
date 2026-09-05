@@ -302,20 +302,23 @@ jobs:
               sleep 30
               continue
             fi
-            # Thrash detector: 5 consecutive full GCs (System.gc excluded) each leaving
-            # >=90% of the heap occupied = the GC death spiral has started and the OOM is
-            # inevitable. Capture a dump at thrash onset and tear down instead of grinding
-            # for hours. (This replaces the JVM's GC-overhead-limit OOM, which a slow
-            # spiral can evade indefinitely.)
+            # Thrash detector: 5 full GCs in a row (System.gc excluded) each leaving
+            # >=90% of the heap occupied = the GC death spiral has started and the OOM
+            # is inevitable. Capture a dump at thrash onset and tear down instead of
+            # grinding for hours. Interleaved young pauses are IGNORED — G1 in the death
+            # spiral alternates Full with insta-failing "Evacuation Failure" young
+            # pauses, so requiring fulls to be adjacent never triggers (canary 33976763806).
+            # Only a full GC that actually frees >10% of the heap resets the streak.
+            # (This replaces the JVM's GC-overhead-limit OOM, which a slow spiral can
+            # evade indefinitely.)
             for gclog in gc-logs/daemon-gc-*.log; do
               [ -f "$gclog" ] || continue
-              last5=$(grep -E 'Pause (Young|Full)' "$gclog" | grep -v 'System\.gc' | tail -5)
-              [ "$(printf '%s\n' "$last5" | grep -c 'Pause Full')" -ge 5 ] || continue
-              hot=$(printf '%s\n' "$last5" | grep -oP '[0-9]+M->\K[0-9]+M\([0-9]+M' \
-                      | awk -F'[M(]' '$1 >= 0.9*$2 {c++} END {print c+0}')
-              if [ "$hot" -ge 5 ]; then
-                echo "watchdog: GC thrash detected in $gclog (5 consecutive full GCs, >=90% heap still live) — tearing down"
-                printf '%s\n' "$last5"
+              thrash=$(grep 'Pause Full' "$gclog" | grep -v 'System\.gc' \
+                       | grep -oP '[0-9]+M->\K[0-9]+M\([0-9]+M' \
+                       | awk -F'[M(]' '{ if ($1 >= 0.9*$2) c++; else c=0; if (c >= 5) f=1 } END { print f+0 }')
+              if [ "$thrash" = "1" ]; then
+                echo "watchdog: GC thrash detected in $gclog (5 full GCs in a row, >=90% heap still live) — tearing down"
+                grep 'Pause Full' "$gclog" | tail -3
                 THRASH_FOUND=1
                 pid=$(basename "$gclog" | sed -E 's/^daemon-gc-([0-9]+)\.log$/\1/')
                 # best-effort dump at thrash onset (smaller than the post-OOM one);
