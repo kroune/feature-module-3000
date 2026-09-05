@@ -36,15 +36,10 @@ modules.
   `agpOverrideRepoUrl`) must be appended to both `gradle.properties` and
   `build-logic/gradle.properties` or build-logic silently compiles against the catalog.
 - **Daemon OOM hangs gradle-profiler's TAPI call forever.** The workflow watchdog
-  kills the profiler tree on either (a) a size-stable daemon dump or (b) GC thrash
-  detected in `gc-logs/daemon-gc-%p.log` (5 consecutive non-System.gc full GCs with
-  ≥90% heap still live → best-effort `jcmd GC.heap_dump`, then teardown). Do NOT
-  re-add `GCTimeLimit`/`GCHeapFreeLimit` (JVM GC-overhead-limit OOM): its trigger is
-  an averaged, resettable 5-full-GC counter gated on soft-ref clearing, so a slow
-  death spiral evades it for hours with no dump and no watchdog escape (run
-  33965733216 base leg hung 3h+). **JDK 25+ writes dumps in segments**: wait while
-  any `*.p[0-9]` file exists, or you kill the daemon mid-dump and publish a
-  header-only file.
+  kills the profiler tree on a size-stable daemon dump or on GC thrash detected in
+  `gc-logs/daemon-gc-%p.log` — keep it intact. **JDK 25+ writes dumps in segments**:
+  wait while any `*.p[0-9]` file exists, or you kill the daemon mid-dump and publish
+  a header-only file.
 - Runner is 16 GB: daemon `-Xmx` must be low enough that the *JVM* throws OOM before
   the kernel OOM-killer (kernel kills write no dump; signature is exit 143 with all
   `if: always()` steps skipped). For 9.8.0-era Gradle with 4g IDE heap: **9g works,
