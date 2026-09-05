@@ -51,6 +51,10 @@ on:
         description: "gradle-profiler dist zip URL (patched build from the build-profiler workflow; upstream 0.25.2 times out waiting for the IDE plugin)"
         default: "https://github.com/kroune/feature-module-3000/releases/download/patched-profiler/gradle-profiler-0.25.2.zip"
         type: string
+      publish_dumps:
+        description: "Publish heap dumps (release assets, artifacts, S3 mirror, heap-report index). false = cheap validation run: logs artifact only, no dump publishing anywhere"
+        default: true
+        type: boolean
 
 permissions:
   contents: write # publish distribution + result releases
@@ -220,10 +224,15 @@ jobs:
       - name: Patch gradle.properties (heap cap, dump path, JDK 25 compact headers)
         run: |
           XMX='${{ inputs.daemon_xmx }}'
-          mkdir -p heap-dumps/daemon heap-dumps/kotlin
+          mkdir -p heap-dumps/daemon heap-dumps/kotlin gc-logs
           sed -i -E "/^org.gradle.jvmargs=/ s|-Xmx[0-9]+[gGmM]|-Xmx$XMX|" gradle.properties
           sed -i -E "/^org.gradle.jvmargs=/ s|-Xms[0-9]+[gGmM]|-Xms$XMX|" gradle.properties
-          sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/daemon -XX:HeapDumpGzipLevel=1 -XX:+UseCompactObjectHeaders -XX:GCTimeLimit=10 -XX:GCHeapFreeLimit=90 -XX:+UseParallelGC|" gradle.properties
+          # GC log feeds the thrash detector in the benchmark watchdog below (%p = pid,
+          # one file per daemon JVM). Do NOT rely on the JVM's own GC-overhead-limit OOM
+          # (GCTimeLimit/GCHeapFreeLimit): its trigger is an averaged, resettable counter
+          # gated on soft-ref clearing — a daemon in a slow GC death spiral can evade it
+          # for hours, and the TAPI call hangs the whole time.
+          sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/daemon -XX:HeapDumpGzipLevel=1 -XX:+UseCompactObjectHeaders -Xlog:gc*:file=$GITHUB_WORKSPACE/gc-logs/daemon-gc-%p.log|" gradle.properties
           sed -i "/^kotlin.daemon.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/kotlin -XX:HeapDumpGzipLevel=1|" gradle.properties
           cat gradle.properties
 
@@ -270,6 +279,7 @@ jobs:
             > profiler.log 2>&1 &
           PROF=$!
           DUMP_FOUND=""
+          THRASH_FOUND=""
           while kill -0 $PROF 2>/dev/null; do
             f=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
             if [ -n "$f" ]; then
@@ -289,17 +299,46 @@ jobs:
                 sleep 10
                 break
               fi
-            else
               sleep 30
+              continue
             fi
+            # Thrash detector: 5 consecutive full GCs (System.gc excluded) each leaving
+            # >=90% of the heap occupied = the GC death spiral has started and the OOM is
+            # inevitable. Capture a dump at thrash onset and tear down instead of grinding
+            # for hours. (This replaces the JVM's GC-overhead-limit OOM, which a slow
+            # spiral can evade indefinitely.)
+            for gclog in gc-logs/daemon-gc-*.log; do
+              [ -f "$gclog" ] || continue
+              last5=$(grep -E 'Pause (Young|Full)' "$gclog" | grep -v 'System\.gc' | tail -5)
+              [ "$(printf '%s\n' "$last5" | grep -c 'Pause Full')" -ge 5 ] || continue
+              hot=$(printf '%s\n' "$last5" | grep -oP '[0-9]+M->\K[0-9]+M\([0-9]+M' \
+                      | awk -F'[M(]' '$1 >= 0.9*$2 {c++} END {print c+0}')
+              if [ "$hot" -ge 5 ]; then
+                echo "watchdog: GC thrash detected in $gclog (5 consecutive full GCs, >=90% heap still live) — tearing down"
+                printf '%s\n' "$last5"
+                THRASH_FOUND=1
+                pid=$(basename "$gclog" | sed -E 's/^daemon-gc-([0-9]+)\.log$/\1/')
+                # best-effort dump at thrash onset (smaller than the post-OOM one);
+                # the VM is mostly parked at safepoints during thrash, so attach works
+                timeout 600 "$JAVA_HOME/bin/jcmd" "$pid" GC.heap_dump -gz=1 \
+                  "$GITHUB_WORKSPACE/heap-dumps/daemon/thrash-$pid.hprof.gz" \
+                  || echo "watchdog: jcmd heap dump failed (non-fatal)"
+                kill -TERM $PROF 2>/dev/null || true
+                sleep 10
+                break
+              fi
+            done
+            [ -n "$THRASH_FOUND" ] && break
+            sleep 30
           done
           kill -KILL $PROF 2>/dev/null || true
           pkill -KILL -f gradle-profiler 2>/dev/null || true
           pkill -KILL -f GradleDaemon 2>/dev/null || true
           pkill -KILL -f studio 2>/dev/null || true
           wait $PROF 2>/dev/null; rc=$?
-          echo "gradle-profiler exit code: $rc (watchdog_dump=$DUMP_FOUND)" | tee -a profiler.log
+          echo "gradle-profiler exit code: $rc (watchdog_dump=$DUMP_FOUND, watchdog_thrash=$THRASH_FOUND)" | tee -a profiler.log
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "thrash=$THRASH_FOUND" >> "$GITHUB_OUTPUT"
           echo "== profiler.log tail =="
           tail -100 profiler.log || true
           exit 0
@@ -324,7 +363,7 @@ jobs:
             echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`)"
             echo "- Android Studio: \`${{ inputs.studio_url }}\`"
             echo "- gradle-profiler: \`${{ inputs.gradle_profiler_url }}\`"
-            echo "- gradle-profiler exit code: \`${{ steps.bench.outputs.rc }}\`"
+            echo "- gradle-profiler exit code: \`${{ steps.bench.outputs.rc }}\` (thrash teardown: \`${{ steps.bench.outputs.thrash }}\`)"
             echo "- workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
             echo '```'
@@ -346,7 +385,7 @@ jobs:
       # smaller. (shark-cli strip-hprof is unusable here: it buffers the whole heap run
       # in memory and int32-overflows the record length past 2 GiB.)
       - name: Strip daemon heap dump
-        if: always()
+        if: ${{ always() && inputs.publish_dumps }}
         run: |
           dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
           if [ -z "$dump" ]; then
@@ -364,8 +403,8 @@ jobs:
           gzip -1 daemon.stripped.hprof
           ls -lh daemon.stripped.hprof.gz
 
-      - name: Upload artifacts
-        if: always()
+      - name: Upload artifacts (dumps + logs)
+        if: ${{ always() && inputs.publish_dumps }}
         uses: actions/upload-artifact@v4
         with:
           name: sync-benchmark-dumps-${{ github.run_number }}-${{ matrix.name }}
@@ -377,6 +416,28 @@ jobs:
             sync.scenarios.ci
             gradle.properties
             gradle/wrapper/gradle-wrapper.properties
+            gc-logs/
+            results/*.csv
+            results/*.html
+            results/*.log
+            results/**/log/**
+            results/**/logs/**
+
+      # publish_dumps=false: logs only — no multi-GB dump artifacts.
+      - name: Upload artifacts (logs only)
+        if: ${{ always() && !inputs.publish_dumps }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-benchmark-logs-${{ github.run_number }}-${{ matrix.name }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            profiler.log
+            summary.md
+            sync.scenarios.ci
+            gradle.properties
+            gradle/wrapper/gradle-wrapper.properties
+            gc-logs/
             results/*.csv
             results/*.html
             results/*.log
@@ -386,7 +447,7 @@ jobs:
       # Results go to a release (not just artifacts): release assets have fast,
       # stable, publicly accessible download URLs — Actions artifact downloads are slow.
       - name: Publish results as a release
-        if: always()
+        if: ${{ always() && inputs.publish_dumps }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -458,7 +519,7 @@ jobs:
       # base leg failed all three full-file attempts while candidate was uploading).
       # Layout: s3://$S3_BUCKET/<release-tag>/<asset>. Never fails the job.
       - name: Upload logs to S3 (non-fatal)
-        if: always()
+        if: ${{ always() && inputs.publish_dumps }}
         continue-on-error: true
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -483,7 +544,7 @@ jobs:
       # Kick off MAT index building in the heap-report repo; a no-op when the PAT
       # secret is absent or no daemon dump was produced.
       - name: Trigger MAT index build (heap-report)
-        if: always()
+        if: ${{ always() && inputs.publish_dumps }}
         env:
           PAT: ${{ secrets.HEAP_REPORT_PAT }}
         run: |
@@ -511,6 +572,10 @@ jobs:
             echo "OK: daemon heap dump captured (OOM reproduced): $dump"
             exit 0
           fi
+          if [ "${{ steps.bench.outputs.thrash }}" = "1" ]; then
+            echo "OK: GC thrash detected at onset and torn down (dump capture best-effort)."
+            exit 0
+          fi
           if [ "${{ steps.bench.outputs.rc }}" = "0" ]; then
             echo "OK: sync completed without OOM."
             exit 0
@@ -527,7 +592,7 @@ jobs:
   # already-published GitHub release (the source of truth); never fails the run.
   upload-s3:
     needs: [ resolve, sync ]
-    if: always()
+    if: ${{ always() && inputs.publish_dumps }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     concurrency:

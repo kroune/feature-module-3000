@@ -2,176 +2,76 @@
 
 ## What this repo is
 
-A **synthetic 3000-module Android project** used to reproduce the Gradle daemon
-`OutOfMemoryError` during **Android Studio Gradle sync** on a 16 GB machine, plus the
-GitHub Actions machinery that reproduces it on demand and publishes heap dumps.
-It is a benchmark/repro harness — there is no production code and nothing to "fix" in
-the app modules themselves.
+Synthetic 3000-module Android project that reproduces the Gradle daemon OOM during
+Android Studio sync on a 16 GB machine, plus GitHub Actions machinery that reproduces
+it on demand and publishes heap dumps. Benchmark harness — nothing to "fix" in app
+modules.
 
 ## Layout
 
-- `api/f<N>-api`, `impl/f<N>-impl`, `ui/f<N>-ui` — the 3000 feature triplets (N = 0..999
-  per tier), plus `foundation/`, `core/`, `common/` libraries and one `app/app` module.
-  All generated, all follow the same pattern; changes should be made by generator-style
-  edits across the board, not by hand-editing individual modules.
-- `build-logic/` — included build with the convention plugins
-  (`CompositeBuildPluginAndroid{App,Lib,KmpLib}.kt`, `compileSdk = 37`).
-- `settings.gradle.kts` — ~3000 `include` lines; `build.gradle.kts` is near-empty.
-- `gradle.properties` — the heart of the repro: `-Xmx10g -Xms7g`,
-  `-XX:+HeapDumpOnOutOfMemoryError` for both the Gradle and Kotlin daemons,
-  configuration cache + Isolated Projects + `org.gradle.tooling.parallel=true`.
-- `sync.scenarios` — gradle-profiler scenario (`studio-sync`, zero warm-ups);
-  `@HEAP_DUMP_DIR@` is substituted with an absolute path before use.
-- `.github/workflows/sync-benchmark.yml` — the benchmark (see README for the full
-  run-down). `.github/workflows/build-profiler.yml` — builds the patched gradle-profiler
-  and publishes it under the `patched-profiler` release tag.
-- `.github/workflows/measure-commits.yml` — end-to-end comparison of two Gradle refs
-  (e.g. an upstream commit vs a fork branch with an optimization) in a single run:
-  resolves the refs to SHAs, builds both bin distributions from source
-  (`:distributions-full:binDistributionZip`, JDK 25) and runs the sync benchmark
-  against both in parallel. Built dists are cached as `gradle-build-<sha12>` release
-  assets, so re-measuring a commit skips its ~35 min build. Default daemon heap here
-  is `9g` (not 10g) — see the kernel OOM-killer gotcha below for why.
-- `.github/workflows/measure-idea-commits.yml` — IDE-side twin of measure-commits: the
-  Gradle distribution is fixed for both legs and what differs is the IDE — it builds the
-  Gradle tooling-extension jars from two IntelliJ refs (`kroune/intellij-community`
-  branches, e.g. `sync-baseline` vs `sync-modern-dep-resolver`) via Bazel (cached as
-  `idea-build-<sha12>` releases) and overlays them into Android Studio before the same
-  sync benchmark. Releases are `run-idea-<N>-{base,candidate}` (+ `-model-diff` with
-  `dump_models=true`). The tooling extension runs inside the daemon, so the OOM signal
-  is still the daemon heap dump.
-- `.github/workflows/measure-agp-commits.yml` — AGP-side twin: Gradle distribution fixed
-  for both legs, what differs is AGP. It builds AGP from two `kroune/platform-tools-base`
-  refs (studio-main snapshot vs optimization branch) via a minimal AOSP `repo` checkout +
-  `tools/gradlew :publishAndroidGradleLocal` (cached as `agp-build-<sha12>` releases with
-  the maven repo tarball + build version), then appends `agpOverrideRepoUrl` /
-  `agpOverrideVersion` to gradle.properties **and build-logic/gradle.properties** (an
-  included build does NOT see the root gradle.properties — verified empirically; without
-  the second append both legs silently compile build-logic against the catalog AGP) before
-  the same sync benchmark (the override is honored by `settings.gradle.kts` +
-  `build-logic/settings.gradle.kts`, defaulting to the catalog 9.2.1 from google()). Releases are `run-agp-<N>-{base,candidate}`.
-- `kroune/heap-report` (separate repo) — the dump viewer + MAT index builder. All
-  benchmark workflows end with a `Trigger MAT index build` step that fires a
-  `repository_dispatch` there (`build-indexes` workflow → `idx-<tag>` release with
-  zstd-compressed MAT indexes). The step is a silent no-op unless the
-  **`HEAP_REPORT_PAT`** secret is set on this repo (PAT with Contents-RW on
-  heap-report — GITHUB_TOKEN can't dispatch cross-repo) and a daemon dump exists.
-- S3 publishing (all 4 benchmark workflows, per release tag): at capture time the daemon
-  dump is also run through **`tools/strip_hprof.py`** (zeroes primitive array contents
-  IN PLACE — same byte count, same offsets, so MAT parses it identically and prebuilt
-  indexes stay valid for both variants; ~25% smaller gzip) producing
-  `daemon.stripped.hprof.gz`, which goes to BOTH the GitHub release (heap-report's
-  build-indexes CI downloads and parses it from there) and the private SeaweedFS S3
-  (`--endpoint-url https://s3.kroune.tech`, bucket from the `S3_BUCKET` secret, layout
-  `s3://<bucket>/<release-tag>/<asset>`, single objects — no 2 GiB splitting on S3).
-  S3 also gets the logs (`logs.tar.gz`) and the IDE dump; the FULL daemon dump is
-  GitHub-only. Small artifacts (logs) upload from the matrix job itself; the
-  multi-GB dumps (`daemon.stripped.hprof.gz`, `ide.hprof.gz`) upload from a final
-  **`upload-s3` job** (`needs: sync`, `if: always()`, repo-wide concurrency group
-  `seaweedfs-s3-upload`) that re-downloads them from the published GitHub release
-  (reassembling `daemon.stripped.hprof.gz.part-*` when split) and uploads ONE file
-  at a time — concurrent matrix legs uploading multi-GB files at once reliably
-  starve the small SeaweedFS/Cloudflare lane (run-25/26: the base leg failed all
-  three full-file attempts while candidate was uploading, and candidate only
-  succeeded once base had stopped). Every object goes through `tools/s3_upload.sh`:
-  aws-cli's default
-  CRC64 trailer checksums are disabled (`when_required` — SeaweedFS/Cloudflare can
-  report multipart completion success but leave no object), then up to 3 attempts with
-  HEAD size verification polled briefly after each one — aws-cli has returned 0 for a
-  truncated multipart upload, so exit status alone is not trusted. S3 steps are
-  `continue-on-error: true` — a failed upload turns the step red but the release stays
-  the source of truth. Secrets: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` /
-  `S3_BUCKET`; aws-cli v2 is preinstalled on ubuntu-latest. (shark-cli strip-hprof is
-  NOT usable for this: it buffers each heap-dump run in memory and int32-overflows the
-  record length past 2 GiB, and its HEAP_DUMP+HEAP_DUMP_END output is counted as two
-  snapshots by MAT.)
+- `api/f<N>-api`, `impl/f<N>-impl`, `ui/f<N>-ui` — 3000 feature triplets (N = 0..999
+  per tier), plus `foundation/`, `core/`, `common/`, one `app/app` module. All
+  generated: change them with generator-style edits across the board, never by hand.
+- `build-logic/` — included build with convention plugins (`compileSdk = 37`).
+- `gradle.properties` — the repro: `-Xmx10g`, heap-dump-on-OOM for Gradle and Kotlin
+  daemons, config cache + Isolated Projects + tooling parallel.
+- Workflows in `.github/workflows/`: `sync-benchmark.yml` (the base benchmark),
+  `build-profiler.yml` (patched gradle-profiler release), and three A/B comparison
+  twins differing in what varies between legs: `measure-commits.yml` (Gradle refs,
+  releases `run-N-{base,candidate}`), `measure-idea-commits.yml` (IntelliJ refs,
+  `run-idea-N-*`), `measure-agp-commits.yml` (AGP refs, `run-agp-N-*`). Built dists are
+  cached as release assets keyed by SHA (`gradle-build-*`, `idea-build-*`, `agp-build-*`).
 
 ## Commands
 
-- Compare two Gradle refs: `gh workflow run measure-commits.yml`
-  `-f base_repo=gradle/gradle -f base_ref=<sha>`
-  `-f candidate_repo=kroune/gradle-fork -f candidate_ref=<branch>`
-  (result releases: `run-<N>-base` / `run-<N>-candidate`).
-- AI-driven branch benchmark: two SPLIT project skills, one per workflow, both
-  **manual-only** (`disableModelInvocation: true` — the model must never dispatch a
-  benchmark on its own, the user triggers every run):
-  - `/measure-oom` (`.kimi-code/skills/measure-oom/SKILL.md`) — Gradle-side: takes a
-    gradle-fork branch link, dispatches measure-commits with base = merge-base against
-    `gradle/gradle` master.
-  - `/measure-idea-oom` (`.kimi-code/skills/measure-idea-oom/SKILL.md`) — IDE-side:
-    takes an intellij-community branch link, dispatches measure-idea-commits with
-    base = the workflow's default baseline ref (`sync-baseline`).
-  Both watch the run (plus a recurring 30-min stuck-check cron), retry infra failures
-  (max 2), and walk `daemon_xmx` down 1g at a time (floor 3g) until the candidate OOMs.
-- Trigger a benchmark run: `gh workflow run sync-benchmark.yml`
-  (inputs: `gradle_distribution_url`, `daemon_xmx`, `studio_url`, `gradle_profiler_url`;
-  use `-f daemon_xmx=2g` for a ~12 min smoke run).
-- Rebuild the patched profiler: `gh workflow run build-profiler.yml`.
-- Check results: `gh release list` — each run publishes a `run-N` release with the dump
-  and logs. A run is successful when its `Verdict` step is green (daemon dump captured,
-  or sync completed without OOM).
-- Local repro: see README ("Running locally").
+- Smoke test (~12 min): `gh workflow run sync-benchmark.yml -f daemon_xmx=2g`
+- Results: `gh release list` — a run is successful when its `Verdict` step is green.
+- `/measure-oom` and `/measure-idea-oom` skills are manual-only — never dispatch a
+  benchmark on your own; the user triggers every run.
+- Local repro: see README.
 
-## Hard-won gotchas (don't rediscover these)
+## Gotchas
 
-- gradle-profiler's build inspection runs `:help` (full configuration), and its TAPI
-  call **hangs forever when the daemon OOMs mid-call**. The workflow's watchdog polls
-  for a size-stable `heap-dumps/daemon/*.hprof.gz` and kills the profiler tree — keep
-  that mechanism intact; without it every run burns the full job timeout.
-  **JDK 25+ writes gzipped heap dumps in parallel segments**: the main `.hprof.gz`
-  holds the header (small and size-stable) while workers write `*.p0`/`*.p1` segments
-  that are merged at the end. A size-stable main file is NOT enough — the watchdog must
-  keep waiting while any `*.p[0-9]` segment exists, or it kills the daemon mid-dump and
-  publishes a header-only file (observed: 14.7 MB "dump" + a 1 GB orphan `.p0`).
-- `warm-ups = 0` requires `--single-shot` (scenario validation fails otherwise).
-- Upstream gradle-profiler waits only 60 s for the IDE plugin to connect; opening 9000
-  modules takes longer. Use the patched build from the `patched-profiler` release
-  (default input); rebuild via `build-profiler.yml` when bumping the profiler version.
-- On CI the IDE must run headless: `GRADLE_PROFILER_OPTS=-Dide.tests.headless=true`.
-  Full-GUI Studio under xvfb hangs in project frame creation and the sync never starts.
-- Heap dumps: `-XX:HeapDumpGzipLevel=1` makes the JVM write gzipped hprofs directly
-  (no raw dump on disk). Runners have ~100 GB of SSD (the older "14 GB" note here was
-  wrong), so disk pressure is not a concern for builds — the `Free disk space` steps
-  (dotnet/boost/ghc/swift/CodeQL + docker prune) were removed from all workflows; the
-  shark strip still needs ~40 GB peak (18 GB decompressed dump + stripped copy).
-  Keep the gzip setting anyway —
-  it keeps release uploads small (assets are capped at 2 GiB, see below).
-  `HeapDumpPath` must point to a **directory** (per-PID filenames); the JVM refuses to
-  overwrite existing files (`O_EXCL`), so FIFO tricks do not work.
-- GitHub release assets are capped at 2 GiB — the release step splits larger dumps into
-  `daemon.hprof.gz.part-*` (reassemble with `cat`; same rules for
-  `daemon.stripped.hprof.gz`, though gzipped-stripped is ~1-1.5 GB so it shouldn't
-  trigger). Actions artifact downloads are very
-  slow (~0.2 MB/s); releases are the primary distribution channel.
-- The runner is 16 GB: keep daemon `-Xmx` + IDE `-Xmx` low enough that the *JVM* throws
-  OOM before the kernel OOM-killer fires (kernel kills write no dump). If `-Xmx` is too
-  high the daemon sits at max RSS while the IDE model-fetch squeezes the box, and the
-  kernel kills the daemon (it carries `oom_score_adj=500` — the first target). The
-  signature: the sync step dies ~35-45 min in with exit 143 / "The operation was
-  canceled" / "hosted runner lost communication", all `if: always()` steps get skipped,
-  and nothing is published. Confirm via `dmesg`: `Out of memory: Killed process ...
-  (java)`. For 9.8.0-era Gradle with the default 4g IDE heap, **9g works, 10g loses the
-  race** (10g was fine for 9.7.0-rc-1, which JVM-OOM'd earlier).
-- The zram step currently fails open: `modprobe zram` → "Module zram not found" on the
-  6.17-azure kernel of current ubuntu-latest images, so runs fall back to the runner's
-  default 3 GB `/swapfile`. Keep the step (it may come back), but don't count on the 8G.
-- Android SDK: API 37 is published as `platforms;android-37.0` (not `android-37`).
-- Android Studio "Quail" downloads are named by codename
-  (`android-studio-quail2-linux.tar.gz`), not by version.
-- Facts about the repro itself: configuration fits in 10 g, the OOM is in the IDE
-  model-fetch phase; the 10g dump decompresses to ~18 GB (~1.8× hprof inflation from
-  8-byte reference IDs).
+- **build-logic does not see the root gradle.properties.** Any property (e.g.
+  `agpOverrideRepoUrl`) must be appended to both `gradle.properties` and
+  `build-logic/gradle.properties` or build-logic silently compiles against the catalog.
+- **Daemon OOM hangs gradle-profiler's TAPI call forever.** The workflow watchdog
+  kills the profiler tree on either (a) a size-stable daemon dump or (b) GC thrash
+  detected in `gc-logs/daemon-gc-%p.log` (5 consecutive non-System.gc full GCs with
+  ≥90% heap still live → best-effort `jcmd GC.heap_dump`, then teardown). Do NOT
+  re-add `GCTimeLimit`/`GCHeapFreeLimit` (JVM GC-overhead-limit OOM): its trigger is
+  an averaged, resettable 5-full-GC counter gated on soft-ref clearing, so a slow
+  death spiral evades it for hours with no dump and no watchdog escape (run
+  33965733216 base leg hung 3h+). **JDK 25+ writes dumps in segments**: wait while
+  any `*.p[0-9]` file exists, or you kill the daemon mid-dump and publish a
+  header-only file.
+- Runner is 16 GB: daemon `-Xmx` must be low enough that the *JVM* throws OOM before
+  the kernel OOM-killer (kernel kills write no dump; signature is exit 143 with all
+  `if: always()` steps skipped). For 9.8.0-era Gradle with 4g IDE heap: **9g works,
+  10g loses the race**.
+- Upstream gradle-profiler waits only 60 s for the IDE plugin — use the patched build
+  from the `patched-profiler` release. On CI the IDE must run headless:
+  `GRADLE_PROFILER_OPTS=-Dide.tests.headless=true`.
+- `warm-ups = 0` requires `--single-shot`.
+- GitHub release assets are capped at 2 GiB → larger dumps are split into
+  `*.part-*` (reassemble with `cat`). Actions artifact downloads are ~0.2 MB/s;
+  releases are the distribution channel.
+- `HeapDumpPath` must be a directory; the JVM uses `O_EXCL`, no overwrite/FIFO tricks.
+- Android SDK: API 37 is `platforms;android-37.0`. Studio "Quail" downloads are named
+  by codename, not version.
+- S3 uploads go through `tools/s3_upload.sh` (CRC64 checksums disabled for SeaweedFS,
+  HEAD-verified, retried — aws-cli exit status alone lies). Multi-GB files upload one
+  at a time from a dedicated `upload-s3` job; concurrent uploads starve the lane.
+  S3 steps are `continue-on-error`; the GitHub release is the source of truth.
+- `HEAP_REPORT_PAT` secret gates the cross-repo MAT-index dispatch to kroune/heap-report
+  (silent no-op without it).
+- Repro facts: configuration fits in 10g; OOM is in the IDE model-fetch phase; the 10g
+  dump decompresses to ~18 GB.
 
 ## Conventions
 
-- **Never commit** machine-specific paths or analysis artifacts. `org.gradle.java.home`
-  lives in `~/.gradle/gradle.properties`, not here. Heap dumps (`*.hprof*`), MAT index
-  files (`*.index`, `*.threads`), `gc-logs/`, `heap-report/`, `leak_report/`,
-  `workspace/`, `graph.dot`, profiler outputs (`results/`, `heap-dumps/`,
-  `gradle-user-home/`, `profile-out*/`, `studio-sandbox/`, `sync.scenarios.ci`) are all
-  gitignored on purpose — they can be huge (tens of GB).
-- `local.properties` (SDK path) is also local-only; CI writes it from `$ANDROID_HOME`.
-- Workflow changes: validate YAML before pushing, then smoke-test with
-  `gh workflow run sync-benchmark.yml -f daemon_xmx=2g` (~12 min) before a full run.
-- The git history is self-contained — this directory used to sit untracked inside a
-  larger experiments repo; do not re-embed it.
+- Never commit analysis artifacts (dumps, indexes, profiler outputs, `gc-logs/`,
+  `heap-report/`, `workspace/` etc. — all gitignored). `org.gradle.java.home` lives in
+  `~/.gradle/gradle.properties`, not here. `local.properties` is local-only.
+- Workflow changes: validate YAML, then smoke-test with the `daemon_xmx=2g` run above
+  before a full run.
