@@ -55,6 +55,18 @@ on:
         description: "Publish heap dumps (release assets, artifacts, S3 mirror, heap-report index). false = cheap validation run: logs artifact only, no dump publishing anywhere"
         default: true
         type: boolean
+      thrash_watchdog:
+        description: "GC-thrash watchdog: tear down on thrash_streak consecutive full GCs each leaving >=thrash_min_live_pct% of the heap live. false = only the heap-dump watchdog tears down (use to collect complete GC curves of known-outcome runs for tuning)"
+        default: true
+        type: boolean
+      thrash_min_live_pct:
+        description: "Thrash detector: min % of heap still live after a full GC to count toward the streak"
+        default: "90"
+        type: string
+      thrash_streak:
+        description: "Thrash detector: consecutive high-live full GCs required to tear down"
+        default: "5"
+        type: string
 
 permissions:
   contents: write # publish distribution + result releases
@@ -302,22 +314,26 @@ jobs:
               sleep 30
               continue
             fi
-            # Thrash detector: 5 full GCs in a row (System.gc excluded) each leaving
-            # >=90% of the heap occupied = the GC death spiral has started and the OOM
-            # is inevitable. Capture a dump at thrash onset and tear down instead of
-            # grinding for hours. Interleaved young pauses are IGNORED — G1 in the death
-            # spiral alternates Full with insta-failing "Evacuation Failure" young
-            # pauses, so requiring fulls to be adjacent never triggers (canary 33976763806).
-            # Only a full GC that actually frees >10% of the heap resets the streak.
+            # Thrash detector: N full GCs in a row (System.gc excluded) each leaving
+            # >=P% of the heap occupied (N/P from thrash_streak/thrash_min_live_pct
+            # inputs) = the GC death spiral has started and the OOM is inevitable.
+            # Capture a dump at thrash onset and tear down instead of grinding for
+            # hours. Interleaved young pauses are IGNORED — G1 in the death spiral
+            # alternates Full with insta-failing "Evacuation Failure" young pauses,
+            # so requiring fulls to be adjacent never triggers (canary 33976763806).
+            # Only a full GC that actually frees past the threshold resets the streak.
             # (This replaces the JVM's GC-overhead-limit OOM, which a slow spiral can
-            # evade indefinitely.)
+            # evade indefinitely.) thrash_watchdog=false disables this block (dump
+            # watchdog above stays on) to collect full GC curves for tuning.
+            if [ '${{ inputs.thrash_watchdog }}' = 'true' ]; then
             for gclog in gc-logs/daemon-gc-*.log; do
               [ -f "$gclog" ] || continue
               thrash=$(grep 'Pause Full' "$gclog" | grep -v 'System\.gc' \
                        | grep -oP '[0-9]+M->\K[0-9]+M\([0-9]+M' \
-                       | awk -F'[M(]' '{ if ($1 >= 0.9*$2) c++; else c=0; if (c >= 5) f=1 } END { print f+0 }')
+                       | awk -F'[M(]' -v p='${{ inputs.thrash_min_live_pct }}' -v n='${{ inputs.thrash_streak }}' \
+                           '{ if ($1*100 >= p*$2) c++; else c=0; if (c >= n) f=1 } END { print f+0 }')
               if [ "$thrash" = "1" ]; then
-                echo "watchdog: GC thrash detected in $gclog (5 full GCs in a row, >=90% heap still live) — tearing down"
+                echo "watchdog: GC thrash detected in $gclog (${{ inputs.thrash_streak }} full GCs in a row, >=${{ inputs.thrash_min_live_pct }}% heap still live) — tearing down"
                 grep 'Pause Full' "$gclog" | tail -3
                 THRASH_FOUND=1
                 pid=$(basename "$gclog" | sed -E 's/^daemon-gc-([0-9]+)\.log$/\1/')
@@ -331,6 +347,7 @@ jobs:
                 break
               fi
             done
+            fi
             [ -n "$THRASH_FOUND" ] && break
             sleep 30
           done
