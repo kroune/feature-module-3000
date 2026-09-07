@@ -67,6 +67,10 @@ on:
         description: "Thrash detector: consecutive high-live full GCs required to tear down"
         default: "5"
         type: string
+      jdk_version:
+        description: "JDK (temurin) for the sync job — runs gradle-profiler and the Gradle daemon. Pin an exact build (e.g. 25.0.4+7) to reproduce a specific runner-image toolchain"
+        default: "25"
+        type: string
 
 permissions:
   contents: write # publish distribution + result releases
@@ -213,7 +217,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: "${{ inputs.jdk_version }}"
 
       - name: Android SDK setup
         run: |
