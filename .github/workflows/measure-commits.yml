@@ -329,12 +329,19 @@ jobs:
             # (This replaces the JVM's GC-overhead-limit OOM, which a slow spiral can
             # evade indefinitely.) thrash_watchdog=false disables this block (dump
             # watchdog above stays on) to collect full GC curves for tuning.
+            #
+            # PARSING GOTCHA: '8379M(9216M' split with awk -F'[M(]' yields $2=""
+            # (consecutive separators), which silently turns the occupancy test into
+            # "always true" — normalize to two plain numbers with sed first.
+            # Validated against captured logs: fires on every true spiral (7g/8g legs,
+            # base@9g), stays silent on a healthy candidate@9g sync (max streak 4).
             if [ '${{ inputs.thrash_watchdog }}' = 'true' ]; then
             for gclog in gc-logs/daemon-gc-*.log; do
               [ -f "$gclog" ] || continue
               thrash=$(grep 'Pause Full' "$gclog" | grep -v 'System\.gc' \
                        | grep -oP '[0-9]+M->\K[0-9]+M\([0-9]+M' \
-                       | awk -F'[M(]' -v p='${{ inputs.thrash_min_live_pct }}' -v n='${{ inputs.thrash_streak }}' \
+                       | sed -E 's/M\(/ /; s/M$//' \
+                       | awk -v p='${{ inputs.thrash_min_live_pct }}' -v n='${{ inputs.thrash_streak }}' \
                            '{ if ($1*100 >= p*$2) c++; else c=0; if (c >= n) f=1 } END { print f+0 }')
               if [ "$thrash" = "1" ]; then
                 echo "watchdog: GC thrash detected in $gclog (${{ inputs.thrash_streak }} full GCs in a row, >=${{ inputs.thrash_min_live_pct }}% heap still live) — tearing down"
