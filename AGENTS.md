@@ -40,6 +40,19 @@ modules.
   `gc-logs/daemon-gc-%p.log` — keep it intact. **JDK 25+ writes dumps in segments**:
   wait while any `*.p[0-9]` file exists, or you kill the daemon mid-dump and publish
   a header-only file.
+- Thrash detector (measure-commits.yml, inputs `thrash_*`): two limbs over consecutive
+  non-System full GCs — hard (>=97% live OR <2% reclaimed → fire) and slow (>=90% live
+  for 10 continuous minutes → fire). Calibrated on captured logs with known outcomes:
+  a healthy 9g sync sits at 89-95% live with 5-11% reclaims for ~4 min at peak model
+  fetch (a bare ">=90% x5" rule false-kills it — run 34180871620); true spirals
+  reclaim ~0.1%. `thrash_watchdog=false` + `publish_dumps=false` = cheap ground-truth
+  runs. Never parse `8379M(9216M` with `awk -F'[M(]'` — consecutive separators leave
+  `$2` empty and any occupancy test becomes always-true.
+- Runner-image drift moves the OOM threshold between identical SHAs: candidate synced
+  at 8g on image 20260816.277, OOMs at 8g on 20260831.293 (6/6 runs, real dumps;
+  JDK build exonerated via `jdk_version` pin). As of Sep 2026: **candidate fits at 9g,
+  base (upstream) grinds forever at 9g and OOMs at <=8g** — 9g is the A/B operating
+  point. Re-baseline after image bumps.
 - Runner is 16 GB: daemon `-Xmx` must be low enough that the *JVM* throws OOM before
   the kernel OOM-killer (kernel kills write no dump; signature is exit 143 with all
   `if: always()` steps skipped). For 9.8.0-era Gradle with 4g IDE heap: **9g works,
