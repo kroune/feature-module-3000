@@ -26,8 +26,16 @@ on:
         description: "Flush profilers and terminate after this many hours (runner cap is 6h)"
         default: "5"
         type: string
+      gradle_repo:
+        description: "GitHub repo (owner/name) to resolve gradle_ref in"
+        default: "kroune/gradle-fork"
+        type: string
+      gradle_ref:
+        description: "Gradle commit SHA / branch / tag — resolved to the cached gradle-build-<sha12> release (built on demand if missing). Leave empty to use gradle_distribution_url instead"
+        default: ""
+        type: string
       gradle_distribution_url:
-        description: "Gradle distribution zip URL (stable / RC / nightly / custom build)"
+        description: "Gradle distribution zip URL (stable / RC / nightly / custom build) — only used when gradle_ref is empty"
         default: "https://services.gradle.org/distributions/gradle-9.7.0-rc-1-bin.zip"
         type: string
       studio_url:
@@ -44,7 +52,111 @@ on:
         type: string
 
 jobs:
+  # Turns gradle_repo@gradle_ref into a bin-distribution URL via the
+  # gradle-build-<sha12> release cache (tools/gradle_dist.sh — same contract as
+  # measure-commits.yml). When gradle_ref is empty, gradle_distribution_url is
+  # used as-is and the build job below is skipped.
+  dist:
+    runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.dist.outputs.url }}
+      sha: ${{ steps.dist.outputs.sha }}
+      tag: ${{ steps.dist.outputs.tag }}
+      asset: ${{ steps.dist.outputs.asset }}
+      exists: ${{ steps.dist.outputs.exists }}
+      label: ${{ steps.dist.outputs.label }}
+    steps:
+      - uses: actions/checkout@v4 # tools/gradle_dist.sh
+
+      - name: Resolve distribution
+        id: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n '${{ inputs.gradle_ref }}' ]; then
+            sha=$(tools/gradle_dist.sh resolve '${{ inputs.gradle_repo }}' '${{ inputs.gradle_ref }}')
+            echo "resolved ${{ inputs.gradle_repo }}@${{ inputs.gradle_ref }} -> $sha"
+            coords=$(tools/gradle_dist.sh coordinates '${{ github.repository }}' "$sha")
+            echo "$coords" >> "$GITHUB_OUTPUT"
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+            echo "label=${{ inputs.gradle_repo }}@${{ inputs.gradle_ref }} (${sha:0:12})" >> "$GITHUB_OUTPUT"
+            tag=$(echo "$coords" | sed -n 's/^tag=//p')
+            if tools/gradle_dist.sh exists '${{ github.repository }}' "$tag"; then
+              echo "Release $tag already exists — skipping the build."
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Release $tag missing — the build job will create it."
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "url=${{ inputs.gradle_distribution_url }}" >> "$GITHUB_OUTPUT"
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "asset=" >> "$GITHUB_OUTPUT"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "label=${{ inputs.gradle_distribution_url }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Cold Gradle runtime build (~1-2 h); only runs when the resolved commit has no
+  # cached gradle-build-<sha12> release yet. Identical to the build job in
+  # measure-commits.yml, so both workflows share the same release cache.
+  build:
+    needs: dist
+    if: needs.dist.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    permissions:
+      contents: write # publish the distribution release
+    steps:
+      # Gradle's own build requires JDK 25 (see its CONTRIBUTING.md); 17/21 are extra
+      # toolchains in case some module pins an older language level.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            25
+            21
+            17
+
+      - name: Check out Gradle sources
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gradle_repo }}
+          ref: ${{ needs.dist.outputs.sha }}
+          path: gradle-src
+          fetch-depth: 1
+
+      - name: Build bin distribution
+        working-directory: gradle-src
+        run: |
+          ./gradlew :distributions-full:binDistributionZip --stacktrace \
+            -Dorg.gradle.java.installations.paths="$JAVA_HOME_17_X64,$JAVA_HOME_21_X64,$JAVA_HOME_25_X64"
+
+      - name: Publish distribution as a release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          zip=$(ls gradle-src/packaging/distributions-full/build/distributions/gradle-*-bin.zip)
+          ver=$(basename "$zip" | sed -E 's/^gradle-//; s/-bin\.zip$//')
+          cp "$zip" '${{ needs.dist.outputs.asset }}'
+          {
+            echo "## Gradle bin distribution built"
+            echo
+            echo "- Source: \`${{ inputs.gradle_repo }}@${{ needs.dist.outputs.sha }}\`"
+            echo "- Version: \`$ver\`"
+            echo "- Asset: \`${{ needs.dist.outputs.asset }}\` ($(stat -c%s '${{ needs.dist.outputs.asset }}') bytes)"
+            echo "- Distribution URL: ${{ needs.dist.outputs.url }}"
+          } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
+          gh release delete '${{ needs.dist.outputs.tag }}' --yes -R '${{ github.repository }}' 2>/dev/null || true
+          gh release create '${{ needs.dist.outputs.tag }}' -R '${{ github.repository }}' \
+            --title "Gradle build $ver (${{ inputs.gradle_repo }}@${{ needs.dist.outputs.sha }})" \
+            --notes-file summary.md \
+            '${{ needs.dist.outputs.asset }}'
+
   profile:
+    needs: [ dist, build ]
+    # runs when build succeeded OR was skipped (cached release already existed)
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     # 6h runner cap; the kill_after_hours watchdog cutoff (default 5h) flushes and
     # terminates the run well before this fires.
@@ -92,7 +204,7 @@ jobs:
 
       - name: Pin Gradle distribution
         run: |
-          url='${{ inputs.gradle_distribution_url }}'
+          url='${{ needs.dist.outputs.url }}'
           esc=$(printf '%s' "$url" | sed 's/[&\\]/\\&/g')
           sed -i "s|^distributionUrl=.*|distributionUrl=$esc|" gradle/wrapper/gradle-wrapper.properties
           grep '^distributionUrl' gradle/wrapper/gradle-wrapper.properties
@@ -306,8 +418,9 @@ jobs:
           {
             echo "## Android Studio sync — profiling run"
             echo
-            echo "- Ref: \`${{ inputs.ref }}\`"
-            echo "- Gradle distribution: \`${{ inputs.gradle_distribution_url }}\`"
+            echo "- Project ref: \`${{ inputs.ref }}\`"
+            echo "- Gradle: \`${{ needs.dist.outputs.label }}\`"
+            echo "- Gradle distribution: \`${{ needs.dist.outputs.url }}\`"
             echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`)"
             echo "- async-profiler: \`${{ inputs.async_profiler_url }}\` (events: cpu, alloc, wall)"
             echo "- JDK Flight Recorder: \`settings=profile\`"
@@ -334,7 +447,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="run-profile-${{ github.run_number }}"
-          gver=$(basename '${{ inputs.gradle_distribution_url }}' | sed -E 's/^gradle-//; s/-(bin|all)\.zip$//')
+          gver=$(basename '${{ needs.dist.outputs.url }}' | sed -E 's/^gradle-//; s/-(bin|all)\.zip$//')
           assets=()
           for f in profile/*.html profile/*.collapsed profile/*.jfr.gz \
                    profiler.log summary.md sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties \

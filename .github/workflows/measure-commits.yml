@@ -93,14 +93,16 @@ jobs:
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4 # tools/gradle_dist.sh
+
       - name: Resolve refs to SHAs
         id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          base_sha=$(gh api 'repos/${{ inputs.base_repo }}/commits/${{ inputs.base_ref }}' -q .sha)
-          cand_sha=$(gh api 'repos/${{ inputs.candidate_repo }}/commits/${{ inputs.candidate_ref }}' -q .sha)
+          base_sha=$(tools/gradle_dist.sh resolve '${{ inputs.base_repo }}' '${{ inputs.base_ref }}')
+          cand_sha=$(tools/gradle_dist.sh resolve '${{ inputs.candidate_repo }}' '${{ inputs.candidate_ref }}')
           echo "base:      ${{ inputs.base_repo }}@${{ inputs.base_ref }} -> $base_sha"
           echo "candidate: ${{ inputs.candidate_repo }}@${{ inputs.candidate_ref }} -> $cand_sha"
           matrix=$(jq -nc \
@@ -125,18 +127,17 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     steps:
+      - uses: actions/checkout@v4 # tools/gradle_dist.sh
+
       - name: Release coordinates / cache check
         id: cached
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sha12=$(echo '${{ matrix.sha }}' | cut -c1-12)
-          tag="gradle-build-$sha12"
-          echo "sha12=$sha12" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "asset=gradle-$sha12-bin.zip" >> "$GITHUB_OUTPUT"
-          echo "url=https://github.com/${{ github.repository }}/releases/download/$tag/gradle-$sha12-bin.zip" >> "$GITHUB_OUTPUT"
-          if gh release view "$tag" -R '${{ github.repository }}' >/dev/null 2>&1; then
+          coords=$(tools/gradle_dist.sh coordinates '${{ github.repository }}' '${{ matrix.sha }}')
+          echo "$coords" >> "$GITHUB_OUTPUT"
+          tag=$(echo "$coords" | sed -n 's/^tag=//p')
+          if tools/gradle_dist.sh exists '${{ github.repository }}' "$tag"; then
             echo "Release $tag already exists — skipping the build."
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
@@ -205,13 +206,13 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Compute distribution URL
         id: dist
         run: |
-          sha12=$(echo '${{ matrix.sha }}' | cut -c1-12)
-          echo "url=https://github.com/${{ github.repository }}/releases/download/gradle-build-$sha12/gradle-$sha12-bin.zip" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v4
+          tools/gradle_dist.sh coordinates '${{ github.repository }}' '${{ matrix.sha }}' \
+            | grep '^url=' >> "$GITHUB_OUTPUT"
 
       # Compressed RAM swap: zero disk cost, keeps the kernel OOM-killer away from the
       # daemon so the JVM itself throws OutOfMemoryError (which is what writes the dump).
