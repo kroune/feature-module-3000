@@ -1,0 +1,389 @@
+name: profile-sync
+
+# Runs a single cold Android Studio sync of this 3000-module project (same
+# gradle-profiler machinery as sync-benchmark) with BOTH profilers attached to
+# the Gradle daemon from JVM start:
+#   - async-profiler (cpu + alloc + wall events, single JFR output)
+#   - JDK Flight Recorder (settings=profile)
+# The sync is expected to run to completion (default heap 9g — the operating
+# point where the sync fits, see AGENTS.md). Because the daemon is killed at the
+# end of the run (and a SIGKILL would destroy all profiling data), recordings
+# are flushed periodically and a final graceful flush (asprof stop + jcmd
+# JFR.dump) happens before teardown. A wall-clock cutoff (default 5h) flushes
+# and terminates the run so it always finishes before the 6h runner timeout.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit / branch / tag of THIS repo to profile"
+        default: "main"
+        type: string
+      daemon_xmx:
+        description: "Gradle daemon heap, -Xmx = -Xms (9g fits; 2g smoke run will OOM)"
+        default: "9g"
+        type: string
+      kill_after_hours:
+        description: "Flush profilers and terminate after this many hours (runner cap is 6h)"
+        default: "5"
+        type: string
+      gradle_distribution_url:
+        description: "Gradle distribution zip URL (stable / RC / nightly / custom build)"
+        default: "https://services.gradle.org/distributions/gradle-9.7.0-rc-1-bin.zip"
+        type: string
+      studio_url:
+        description: "Android Studio linux.tar.gz URL (from jb.gg/android-studio-releases-list.json)"
+        default: "https://edgedl.me.gvt1.com/android/studio/ide-zips/2026.1.2.10/android-studio-quail2-linux.tar.gz"
+        type: string
+      gradle_profiler_url:
+        description: "gradle-profiler dist zip URL (patched build; upstream 0.25.2 times out waiting for the IDE plugin)"
+        default: "https://github.com/kroune/feature-module-3000/releases/download/patched-profiler/gradle-profiler-0.25.2.zip"
+        type: string
+      async_profiler_url:
+        description: "async-profiler linux-x64 tarball URL"
+        default: "https://github.com/async-profiler/async-profiler/releases/download/v4.5/async-profiler-4.5-linux-x64.tar.gz"
+        type: string
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.kill_after_hours * 60 + 40 }}
+    permissions:
+      contents: write # publish result releases
+    env:
+      AP_HOME: ${{ runner.temp }}/async-profiler
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Compressed RAM swap: keeps the kernel OOM-killer away from the daemon so the
+      # JVM itself throws OutOfMemoryError (which writes the heap dump) if the heap cap
+      # is too low — kernel kills would take the profiling data down with the process.
+      - name: Add zram swap
+        run: |
+          if sudo modprobe zram; then
+            echo lz4 | sudo tee /sys/block/zram0/comp_algorithm
+            echo 8G | sudo tee /sys/block/zram0/disksize
+            sudo mkswap /dev/zram0 && sudo swapon -p 100 /dev/zram0
+          else
+            echo "zram unavailable, continuing without extra swap"
+          fi
+          free -h; swapon --show
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      # Let async-profiler's cpu event use perf_events instead of the ctimer fallback.
+      - name: Enable perf_events (non-fatal)
+        run: sudo sysctl kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 || true
+
+      - name: Android SDK setup
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          command -v sdkmanager >/dev/null && SDKM=sdkmanager
+          yes | "$SDKM" --licenses >/dev/null || true
+          if ! ls -d "$ANDROID_HOME"/platforms/android-37* >/dev/null 2>&1; then
+            "$SDKM" "platforms;android-37.0"
+          fi
+          ls "$ANDROID_HOME/platforms"
+
+      - name: Pin Gradle distribution
+        run: |
+          url='${{ inputs.gradle_distribution_url }}'
+          esc=$(printf '%s' "$url" | sed 's/[&\\]/\\&/g')
+          sed -i "s|^distributionUrl=.*|distributionUrl=$esc|" gradle/wrapper/gradle-wrapper.properties
+          grep '^distributionUrl' gradle/wrapper/gradle-wrapper.properties
+
+      - name: Install async-profiler
+        run: |
+          curl -sL -o ap.tar.gz "${{ inputs.async_profiler_url }}"
+          mkdir -p "$AP_HOME"
+          tar -xzf ap.tar.gz -C "$AP_HOME" --strip-components=1
+          rm ap.tar.gz
+          ls "$AP_HOME/bin" "$AP_HOME/lib"
+          "$AP_HOME/bin/asprof" --version
+
+      # Both profilers start with the daemon JVM via org.gradle.jvmargs:
+      #   -agentpath: async-profiler records cpu+alloc+wall into one JFR (converted
+      #     to per-event flamegraphs/collapsed stacks after the run with jfrconv)
+      #   -XX:StartFlightRecording: JDK JFR with the 'profile' preset, capped at 4g
+      # Heap-dump-on-OOM flags stay as insurance (low heap / runner-image drift).
+      - name: Patch gradle.properties (heap cap, dump path, both profilers)
+        run: |
+          XMX='${{ inputs.daemon_xmx }}'
+          mkdir -p heap-dumps/daemon heap-dumps/kotlin profile
+          sed -i -E "/^org.gradle.jvmargs=/ s|-Xmx[0-9]+[gGmM]|-Xmx$XMX|" gradle.properties
+          sed -i -E "/^org.gradle.jvmargs=/ s|-Xms[0-9]+[gGmM]|-Xms$XMX|" gradle.properties
+          sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/daemon -XX:HeapDumpGzipLevel=1 -XX:+UseCompactObjectHeaders|" gradle.properties
+          sed -i "/^kotlin.daemon.jvmargs=/ s|\$| -XX:HeapDumpPath=$GITHUB_WORKSPACE/heap-dumps/kotlin -XX:HeapDumpGzipLevel=1|" gradle.properties
+          sed -i "/^org.gradle.jvmargs=/ s|\$| -agentpath:$AP_HOME/lib/libasyncProfiler.so=start,event=cpu,alloc,wall,jfr,file=$GITHUB_WORKSPACE/profile/asprof.jfr|" gradle.properties
+          sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:StartFlightRecording=name=sync,filename=$GITHUB_WORKSPACE/profile/jdk-sync.jfr,settings=profile,maxsize=4g,dumponexit=true|" gradle.properties
+          cat gradle.properties
+
+      - name: Install gradle-profiler
+        run: |
+          curl -sL -o gp.zip "${{ inputs.gradle_profiler_url }}"
+          mkdir -p "$RUNNER_TEMP/gp" && unzip -q gp.zip -d "$RUNNER_TEMP/gp" && rm gp.zip
+          GP_BIN=$(find "$RUNNER_TEMP/gp" -type f -name gradle-profiler -path "*/bin/*" | head -1)
+          echo "Found profiler at $GP_BIN"
+          echo "$(dirname "$GP_BIN")" >> "$GITHUB_PATH"
+          "$GP_BIN" --version
+
+      - name: Install Android Studio
+        run: |
+          curl -sL -o studio.tar.gz "${{ inputs.studio_url }}"
+          mkdir -p "$RUNNER_TEMP/studio"
+          tar -xzf studio.tar.gz -C "$RUNNER_TEMP/studio" --strip-components=1
+          rm studio.tar.gz
+          ls "$RUNNER_TEMP/studio/bin"
+          df -h /
+
+      # gradle-profiler hangs forever when the daemon dies mid-sync (the TAPI call
+      # never returns), and SIGKILLing the daemon would destroy both recordings.
+      # The watchdog therefore flushes every 10 min (asprof dump + jcmd JFR.dump are
+      # non-stopping snapshots), and on timeout / daemon-OOM flushes once more BEFORE
+      # tearing anything down.
+      - name: Run Android Studio sync via gradle-profiler
+        id: bench
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/guh
+          # Force gradle-profiler to launch the IDE with its headless starter
+          # (full-GUI Studio hangs on project frame creation on CI).
+          GRADLE_PROFILER_OPTS: "-Dide.tests.headless=true"
+          KILL_AFTER_HOURS: ${{ inputs.kill_after_hours }}
+        run: |
+          if ! command -v xvfb-run >/dev/null; then sudo apt-get update && sudo apt-get install -y xvfb; fi
+          mkdir -p heap-dumps/ide
+          sed "s|@HEAP_DUMP_DIR@|$GITHUB_WORKSPACE/heap-dumps|" sync.scenarios > sync.scenarios.ci
+          cat sync.scenarios.ci
+
+          KILL_AFTER=$(( KILL_AFTER_HOURS * 3600 ))
+          FLUSH_EVERY=600
+
+          daemon_pid() { pgrep -f 'GradleDaemon' | head -1; }
+
+          # Non-stopping snapshot: profiling continues afterwards.
+          flush_profiles() {
+            local pid; pid=$(daemon_pid)
+            if [ -z "$pid" ]; then echo "watchdog: no daemon to flush"; return 0; fi
+            echo "watchdog: flushing profilers (pid $pid, ${SECONDS}s elapsed)"
+            # timeout-guarded: the attach can block while the JVM is stopped writing
+            # a heap dump — don't let a flush hang the watchdog.
+            timeout 120 "$AP_HOME/bin/asprof" dump "$pid" 2>&1 | tail -2 || true
+            timeout 120 jcmd "$pid" JFR.dump name=sync filename="$GITHUB_WORKSPACE/profile/jdk-sync.jfr" 2>&1 | tail -2 || true
+          }
+
+          set +e
+          xvfb-run -a gradle-profiler --benchmark \
+            --single-shot \
+            --project-dir . \
+            --scenario-file sync.scenarios.ci \
+            --studio-install-dir "$RUNNER_TEMP/studio" \
+            --output-dir results \
+            > profiler.log 2>&1 &
+          PROF=$!
+          SECONDS=0
+          LAST_FLUSH=0
+          DUMP_FOUND=""
+          TIMED_OUT=""
+          while kill -0 $PROF 2>/dev/null; do
+            f=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+            if [ -n "$f" ]; then
+              # The daemon is OOMing — it may still be alive writing the dump; try a
+              # last flush, then wait out the dump (JDK 25+ writes *.p0/*.p1/...
+              # segments that are merged at the end — never kill it mid-dump).
+              if [ -z "$DUMP_FOUND" ]; then
+                DUMP_FOUND=1
+                flush_profiles
+              fi
+              if ls heap-dumps/daemon/*.p[0-9] >/dev/null 2>&1; then
+                sleep 30
+                continue
+              fi
+              s1=$(stat -c%s "$f"); sleep 30; s2=$(stat -c%s "$f" 2>/dev/null || echo 0)
+              if [ "$s1" -gt 0 ] && [ "$s1" = "$s2" ]; then
+                echo "watchdog: complete daemon dump detected ($f, $s1 bytes) — terminating the run"
+                break
+              fi
+            elif [ $SECONDS -ge $KILL_AFTER ]; then
+              echo "watchdog: ${KILL_AFTER_HOURS}h cutoff reached — flushing and terminating"
+              TIMED_OUT=1
+              flush_profiles
+              break
+            else
+              if [ $((SECONDS - LAST_FLUSH)) -ge $FLUSH_EVERY ]; then
+                flush_profiles
+                LAST_FLUSH=$SECONDS
+              fi
+              sleep 30
+            fi
+          done
+
+          # Final graceful flush while the daemon is still alive (healthy sync or
+          # timeout): asprof stop writes the full recording; JFR.dump snapshots the
+          # in-memory/buffered JFR data. If the daemon already exited cleanly, the
+          # JVM wrote both files itself (asprof dumps on exit; dumponexit=true).
+          if [ -z "$DUMP_FOUND" ]; then
+            pid=$(daemon_pid)
+            if [ -n "$pid" ]; then
+              echo "watchdog: final flush (pid $pid)"
+              timeout 120 "$AP_HOME/bin/asprof" stop "$pid" 2>&1 | tail -2 || true
+              timeout 120 jcmd "$pid" JFR.dump name=sync filename="$GITHUB_WORKSPACE/profile/jdk-sync.jfr" 2>&1 | tail -2 || true
+            fi
+          fi
+
+          kill -KILL $PROF 2>/dev/null || true
+          pkill -KILL -f gradle-profiler 2>/dev/null || true
+          pkill -KILL -f GradleDaemon 2>/dev/null || true
+          pkill -KILL -f studio 2>/dev/null || true
+          wait $PROF 2>/dev/null; rc=$?
+          echo "gradle-profiler exit code: $rc (watchdog_dump=$DUMP_FOUND timed_out=$TIMED_OUT)" | tee -a profiler.log
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "timed_out=$TIMED_OUT" >> "$GITHUB_OUTPUT"
+          echo "== profiler.log tail =="
+          tail -100 profiler.log || true
+          exit 0
+
+      # One asprof.jfr holds all three events; jfrconv derives per-event flamegraphs
+      # and folded stacks (input for custom visualizations). The JDK JFR gets the
+      # same treatment where its event types allow. All conversions are best-effort.
+      - name: Convert profiles to flamegraphs and folded stacks
+        if: always()
+        run: |
+          JC="$AP_HOME/bin/jfrconv"
+          cd profile 2>/dev/null || { echo "no profile dir"; exit 0; }
+          if [ -f asprof.jfr ]; then
+            for ev in cpu alloc wall; do
+              "$JC" --$ev --title "Gradle daemon $ev — async-profiler" asprof.jfr asprof-$ev.html || true
+              "$JC" --$ev asprof.jfr asprof-$ev.collapsed || true
+            done
+            "$JC" --cpu -o heatmap asprof.jfr asprof-heatmap.html || true
+          fi
+          if [ -f jdk-sync.jfr ]; then
+            "$JC" --cpu --title "Gradle daemon cpu — JDK JFR" jdk-sync.jfr jdk-cpu.html || true
+            "$JC" --alloc --title "Gradle daemon alloc — JDK JFR" jdk-sync.jfr jdk-alloc.html || true
+          fi
+          for f in *.jfr; do [ -e "$f" ] && gzip -1 "$f"; done
+          ls -lh
+
+      - name: Collect dumps
+        if: always()
+        run: |
+          find heap-dumps -name '*.hprof' -exec gzip -1 {} \; 2>/dev/null || true
+          ls -laR heap-dumps/ || true
+          du -sh results 2>/dev/null || true
+          df -h /; free -h
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: profile-sync-${{ github.run_number }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            profile/
+            heap-dumps/
+            profiler.log
+            sync.scenarios.ci
+            gradle.properties
+            gradle/wrapper/gradle-wrapper.properties
+            results/*.csv
+            results/*.html
+            results/*.log
+            results/**/log/**
+            results/**/logs/**
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Android Studio sync — profiling run"
+            echo
+            echo "- Ref: \`${{ inputs.ref }}\`"
+            echo "- Gradle distribution: \`${{ inputs.gradle_distribution_url }}\`"
+            echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`)"
+            echo "- async-profiler: \`${{ inputs.async_profiler_url }}\` (events: cpu, alloc, wall)"
+            echo "- JDK Flight Recorder: \`settings=profile\`"
+            echo "- Android Studio: \`${{ inputs.studio_url }}\`"
+            echo "- gradle-profiler exit code: \`${{ steps.bench.outputs.rc }}\`, timed out: \`${{ steps.bench.outputs.timed_out }}\`"
+            echo "- workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo '```'
+            ls -lh profile/ 2>/dev/null || echo "no profile dir"
+            echo '```'
+            echo
+            if ls profile/*.jfr.gz >/dev/null 2>&1; then
+              echo "**Profiles captured**"
+            else
+              echo "**No profiles captured** (daemon OOMed before any flush, or never started)"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
+
+      # Results go to a release (not just artifacts): release assets have fast,
+      # stable, publicly accessible download URLs — Actions artifact downloads are slow.
+      - name: Publish results as a release
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="run-profile-${{ github.run_number }}"
+          gver=$(basename '${{ inputs.gradle_distribution_url }}' | sed -E 's/^gradle-//; s/-(bin|all)\.zip$//')
+          assets=()
+          for f in profile/*.html profile/*.collapsed profile/*.jfr.gz \
+                   profiler.log summary.md sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties \
+                   results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log; do
+            [ -f "$f" ] && assets+=("$f")
+          done
+          if ls profile/*.jfr.gz >/dev/null 2>&1; then
+            outcome="profiles captured (async-profiler cpu/alloc/wall + JDK JFR)"
+          else
+            outcome="no profiles captured"
+          fi
+          dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+          if [ -n "$dump" ]; then
+            cp "$dump" daemon.hprof.gz
+            size=$(stat -c%s daemon.hprof.gz)
+            outcome="$outcome + daemon OOM heap dump ($size bytes gzipped)"
+            # GitHub release assets are capped at 2 GiB — split larger dumps.
+            if [ "$size" -gt 2000000000 ]; then
+              split -b 1900m daemon.hprof.gz daemon.hprof.gz.part-
+              rm daemon.hprof.gz
+              assets+=(daemon.hprof.gz.part-*)
+              {
+                echo
+                echo "**Note:** \`daemon.hprof.gz\` exceeds the 2 GiB release-asset limit and is split into parts. Reassemble with:"
+                echo '```'
+                echo "cat daemon.hprof.gz.part-* > daemon.hprof.gz"
+                echo '```'
+              } >> summary.md
+            else
+              assets+=(daemon.hprof.gz)
+            fi
+          fi
+          gh release delete "$tag" --yes -R '${{ github.repository }}' 2>/dev/null || true
+          gh release create "$tag" -R '${{ github.repository }}' \
+            --title "Profile run #${{ github.run_number }} — Gradle $gver, ref ${{ inputs.ref }}, daemon ${{ inputs.daemon_xmx }} — $outcome" \
+            --notes-file summary.md \
+            "${assets[@]}"
+          echo "**Results published: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$tag**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verdict
+        if: always()
+        run: |
+          for f in profile/*.jfr.gz profile/*.jfr; do
+            if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 102400 ]; then
+              echo "OK: profiles captured ($f)"
+              exit 0
+            fi
+          done
+          dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+          if [ -n "$dump" ] && [ "$(stat -c%s "$dump")" -gt 10485760 ]; then
+            echo "OK: daemon OOMed before profiles could be flushed; heap dump captured: $dump"
+            exit 0
+          fi
+          echo "FAIL: no profiling data and no daemon dump captured."
+          exit 1

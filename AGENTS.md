@@ -21,6 +21,12 @@ modules.
   releases `run-N-{base,candidate}`), `measure-idea-commits.yml` (IntelliJ refs,
   `run-idea-N-*`), `measure-agp-commits.yml` (AGP refs, `run-agp-N-*`). Built dists are
   cached as release assets keyed by SHA (`gradle-build-*`, `idea-build-*`, `agp-build-*`).
+  `profile-sync.yml` profiles a healthy Studio sync of a chosen repo ref (`ref` input,
+  releases `run-profile-N-*`): async-profiler (cpu+alloc+wall into one JFR) and JDK JFR
+  (`settings=profile`) both start with the daemon via `org.gradle.jvmargs`; the watchdog
+  flushes both periodically (non-stopping `asprof dump` + `jcmd JFR.dump`) and once more
+  before teardown — SIGKILLing the daemon would destroy both recordings. A
+  `kill_after_hours` cutoff (default 5h) keeps the run inside the 6h runner cap.
 
 ## Commands
 
