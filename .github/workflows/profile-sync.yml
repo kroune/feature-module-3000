@@ -46,11 +46,11 @@ on:
 jobs:
   profile:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.kill_after_hours * 60 + 40 }}
+    # 6h runner cap; the kill_after_hours watchdog cutoff (default 5h) flushes and
+    # terminates the run well before this fires.
+    timeout-minutes: 360
     permissions:
       contents: write # publish result releases
-    env:
-      AP_HOME: ${{ runner.temp }}/async-profiler
     steps:
       - uses: actions/checkout@v4
         with:
@@ -99,6 +99,7 @@ jobs:
 
       - name: Install async-profiler
         run: |
+          AP_HOME="$RUNNER_TEMP/async-profiler"
           curl -sL -o ap.tar.gz "${{ inputs.async_profiler_url }}"
           mkdir -p "$AP_HOME"
           tar -xzf ap.tar.gz -C "$AP_HOME" --strip-components=1
@@ -114,6 +115,7 @@ jobs:
       - name: Patch gradle.properties (heap cap, dump path, both profilers)
         run: |
           XMX='${{ inputs.daemon_xmx }}'
+          AP_HOME="$RUNNER_TEMP/async-profiler"
           mkdir -p heap-dumps/daemon heap-dumps/kotlin profile
           sed -i -E "/^org.gradle.jvmargs=/ s|-Xmx[0-9]+[gGmM]|-Xmx$XMX|" gradle.properties
           sed -i -E "/^org.gradle.jvmargs=/ s|-Xms[0-9]+[gGmM]|-Xms$XMX|" gradle.properties
@@ -162,6 +164,7 @@ jobs:
 
           KILL_AFTER=$(( KILL_AFTER_HOURS * 3600 ))
           FLUSH_EVERY=600
+          AP_HOME="$RUNNER_TEMP/async-profiler"
 
           daemon_pid() { pgrep -f 'GradleDaemon' | head -1; }
 
@@ -253,7 +256,7 @@ jobs:
       - name: Convert profiles to flamegraphs and folded stacks
         if: always()
         run: |
-          JC="$AP_HOME/bin/jfrconv"
+          JC="$RUNNER_TEMP/async-profiler/bin/jfrconv"
           cd profile 2>/dev/null || { echo "no profile dir"; exit 0; }
           if [ -f asprof.jfr ]; then
             for ev in cpu alloc wall; do
