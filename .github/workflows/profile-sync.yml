@@ -365,6 +365,9 @@ jobs:
       # One asprof.jfr holds all three events; jfrconv derives per-event flamegraphs
       # and folded stacks (input for custom visualizations). The JDK JFR gets the
       # same treatment where its event types allow. All conversions are best-effort.
+      # --norm normalizes lambda/hidden-class names (pkg.Class$$Lambda+0x.../12345):
+      # without it every lambda instance is a unique frame and a full-sync folded
+      # stack file blows past the 2 GiB release-asset cap (run 34345156753).
       - name: Convert profiles to flamegraphs and folded stacks
         if: always()
         run: |
@@ -372,15 +375,17 @@ jobs:
           cd profile 2>/dev/null || { echo "no profile dir"; exit 0; }
           if [ -f asprof.jfr ]; then
             for ev in cpu alloc wall; do
-              "$JC" --$ev --title "Gradle daemon $ev — async-profiler" asprof.jfr asprof-$ev.html || true
-              "$JC" --$ev asprof.jfr asprof-$ev.collapsed || true
+              "$JC" --$ev --norm --minwidth 0.01 --title "Gradle daemon $ev — async-profiler" asprof.jfr asprof-$ev.html || true
+              "$JC" --$ev --norm asprof.jfr asprof-$ev.collapsed || true
             done
-            "$JC" --cpu -o heatmap asprof.jfr asprof-heatmap.html || true
+            "$JC" --cpu --norm -o heatmap asprof.jfr asprof-heatmap.html || true
           fi
           if [ -f jdk-sync.jfr ]; then
-            "$JC" --cpu --title "Gradle daemon cpu — JDK JFR" jdk-sync.jfr jdk-cpu.html || true
-            "$JC" --alloc --title "Gradle daemon alloc — JDK JFR" jdk-sync.jfr jdk-alloc.html || true
+            "$JC" --cpu --norm --minwidth 0.01 --title "Gradle daemon cpu — JDK JFR" jdk-sync.jfr jdk-cpu.html || true
+            "$JC" --alloc --norm --minwidth 0.01 --title "Gradle daemon alloc — JDK JFR" jdk-sync.jfr jdk-alloc.html || true
           fi
+          # folded stacks from a full sync are huge even normalized — always gzip
+          for f in *.collapsed; do [ -e "$f" ] && gzip -1 "$f"; done
           for f in *.jfr; do [ -e "$f" ] && gzip -1 "$f"; done
           ls -lh
 
@@ -448,8 +453,23 @@ jobs:
         run: |
           tag="run-profile-${{ github.run_number }}"
           gver=$(basename '${{ needs.dist.outputs.url }}' | sed -E 's/^gradle-//; s/-(bin|all)\.zip$//')
+          # Last-resort: no asset may exceed the 2 GiB release cap (a full sync
+          # produces multi-GB folded stacks even normalized/gzipped).
+          for f in profile/*; do
+            [ -f "$f" ] || continue
+            if [ "$(stat -c%s "$f")" -gt 2000000000 ]; then
+              split -b 1900m "$f" "$f.part-" && rm "$f"
+              {
+                echo
+                echo "**Note:** \`$f\` exceeds the 2 GiB release-asset limit and is split into parts. Reassemble with:"
+                echo '```'
+                echo "cat $f.part-* > $f"
+                echo '```'
+              } >> summary.md
+            fi
+          done
           assets=()
-          for f in profile/*.html profile/*.collapsed profile/*.jfr.gz \
+          for f in profile/*.html profile/*.collapsed.gz profile/*.jfr.gz profile/*.part-* \
                    profiler.log summary.md sync.scenarios.ci gradle.properties gradle/wrapper/gradle-wrapper.properties \
                    results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log; do
             [ -f "$f" ] && assets+=("$f")
