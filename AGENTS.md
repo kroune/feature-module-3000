@@ -44,7 +44,10 @@ modules.
   All orchestration lives in `tools/jfr/` (`measure.sh` setup/run,
   `jfr-measure.init.gradle`, `render_memory_graph.py`, `publish.sh`); the
   workflow is thin glue. Flow: measurement run → pick a marker from
-  `markers.csv` in the release → re-dispatch with `dump_marker`.
+  `markers.csv` in the release → re-dispatch with `dump_marker`. Smoke-test it
+  with `daemon_xmx=2g -f expect_oom=true` (deliberate early OOM); the OOM-dump
+  fallback in the Verdict only counts when `expect_oom=true` — a real 9g run
+  that OOMs is a failed measurement and stays red.
 
 ## Commands
 

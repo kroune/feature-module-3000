@@ -32,6 +32,11 @@ on:
         description: "Flush JFR and terminate after this many hours (runner cap is 6h)"
         default: "5"
         type: string
+      expect_oom:
+        description: "true only for deliberately under-provisioned smoke runs (e.g. daemon_xmx=2g): lets the Verdict pass on the OOM insurance dump. Real runs must keep this false — an OOM there is a FAILED measurement, not a result"
+        default: "false"
+        type: choice
+        options: ["false", "true"]
       dump_marker:
         description: "Regex matched against BuildOperation displayName (see markers.csv from a measurement run). Empty = measurement only; set = daemon heap-dumps after the matching operation completes"
         default: ""
@@ -344,10 +349,12 @@ jobs:
             fi
           fi
           if [ -n "$ok" ]; then echo "OK: $ok"; exit 0; fi
-          # Fallback (same as profile-sync): a low-heap smoke run OOMs the daemon
-          # before any JFR flush can succeed — the insurance dump is the artifact.
-          if [ -n "$dump" ] && [ "$(stat -c%s "$dump")" -gt 10485760 ]; then
-            echo "OK: daemon OOMed before JFR could be flushed; heap dump captured: $dump"
+          # OOM insurance dump: only counts as success for deliberately
+          # under-provisioned smoke runs (expect_oom=true). On a real run an
+          # OOM means the measurement failed — the dump is still published as
+          # an artifact, but the Verdict stays red.
+          if [ '${{ inputs.expect_oom }}' = 'true' ] && [ -n "$dump" ] && [ "$(stat -c%s "$dump")" -gt 10485760 ]; then
+            echo "OK (expect_oom): daemon OOMed as expected; heap dump captured: $dump"
             exit 0
           fi
           echo "FAIL: no JFR snapshot, no memory graph, no heap dump captured."
