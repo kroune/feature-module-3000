@@ -81,6 +81,10 @@ modules.
   the kernel OOM-killer (kernel kills write no dump; signature is exit 143 with all
   `if: always()` steps skipped). For 9.8.0-era Gradle with 4g IDE heap: **9g works,
   10g loses the race**.
+- **gradle-profiler ignores `GRADLE_USER_HOME` env for studio-sync** — it defaults to
+  `<project>/gradle-user-home` (run 34518694398). Pass `--gradle-user-home` explicitly;
+  anything GUH-dependent (init.d scripts, GUH gradle.properties) must also be mirrored
+  into the project-dir fallback.
 - Upstream gradle-profiler waits only 60 s for the IDE plugin — use the patched build
   from the `patched-profiler` release. On CI the IDE must run headless:
   `GRADLE_PROFILER_OPTS=-Dide.tests.headless=true`.

@@ -15,14 +15,14 @@ GUH="${GRADLE_USER_HOME:-/nonexistent}"
 SUMMARY_MD="${SUMMARY_MD:-summary.md}"
 
 # --- compress + evidence -----------------------------------------------------
-for f in profile/*.jfr; do [ -e "$f" ] && gzip -1 "$f"; done
-for f in graph/*.jfr; do [ -e "$f" ] && gzip -1 "$f"; done
+for f in profile/*.jfr; do [ -e "$f" ] && gzip -1 "$f" || true; done
+for f in graph/*.jfr; do [ -e "$f" ] && gzip -1 "$f" || true; done
 find heap-dumps -name '*.hprof' -exec gzip -1 {} \; 2>/dev/null || true
-[ -f "$GUH/gradle.properties" ] && cp "$GUH/gradle.properties" guh-gradle.properties || true
+if [ -f "$GUH/gradle.properties" ]; then cp "$GUH/gradle.properties" guh-gradle.properties; fi
 
 # --- asset list --------------------------------------------------------------
 assets=()
-add() { [ -f "$1" ] && assets+=("$1"); }
+add() { if [ -f "$1" ]; then assets+=("$1"); fi; }
 for f in profile/*.jfr.gz graph/memory.html graph/memory.csv graph/gc.csv graph/markers.csv \
          profiler.log "$SUMMARY_MD" sync.scenarios.ci gradle.properties guh-gradle.properties \
          gradle/wrapper/gradle-wrapper.properties \
@@ -31,7 +31,7 @@ for f in profile/*.jfr.gz graph/memory.html graph/memory.csv graph/gc.csv graph/
 done
 
 # Largest heap dump, if any (marker-triggered or OOM insurance).
-dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1) || true
 if [ -n "$dump" ]; then
   cp "$dump" daemon.hprof.gz
   size=$(stat -c%s daemon.hprof.gz)

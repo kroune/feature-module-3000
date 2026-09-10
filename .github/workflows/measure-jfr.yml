@@ -334,8 +334,8 @@ jobs:
             if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 102400 ]; then ok="JFR snapshot captured ($f)"; fi
           done
           [ -s graph/memory.csv ] && [ "$(wc -l < graph/memory.csv)" -gt 10 ] && ok="$ok; memory graph rendered"
+          dump=$(ls -S heap-dumps/daemon/*.hprof.gz heap-dumps/daemon/*.hprof 2>/dev/null | head -1) || true
           if [ -n '${{ inputs.dump_marker }}' ]; then
-            dump=$(ls -S heap-dumps/daemon/*.hprof.gz heap-dumps/daemon/*.hprof 2>/dev/null | head -1)
             if [ -n "$dump" ] && [ "$(stat -c%s "$dump")" -gt 10485760 ]; then
               ok="$ok; marker dump captured ($dump)"
             else
@@ -344,5 +344,11 @@ jobs:
             fi
           fi
           if [ -n "$ok" ]; then echo "OK: $ok"; exit 0; fi
-          echo "FAIL: no JFR snapshot and no memory graph captured."
+          # Fallback (same as profile-sync): a low-heap smoke run OOMs the daemon
+          # before any JFR flush can succeed — the insurance dump is the artifact.
+          if [ -n "$dump" ] && [ "$(stat -c%s "$dump")" -gt 10485760 ]; then
+            echo "OK: daemon OOMed before JFR could be flushed; heap dump captured: $dump"
+            exit 0
+          fi
+          echo "FAIL: no JFR snapshot, no memory graph, no heap dump captured."
           exit 1

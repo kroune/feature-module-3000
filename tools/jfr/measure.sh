@@ -52,9 +52,13 @@ cmd_setup() {
 
   # Gradle's build-operation JFR emitter (Gradle >= 9.7.0) is an internal option
   # resolved from gradle.properties; the marker/dump knobs reach the daemon as
-  # system properties via systemProp.*. Both live in GRADLE_USER_HOME so the
-  # repo gradle.properties stays the shared repro baseline.
-  mkdir -p "$GUH/init.d"
+  # system properties via systemProp.*. Written to BOTH the repo
+  # gradle.properties (always read) and GRADLE_USER_HOME/gradle.properties,
+  # and the init script is installed into both GUH candidates: gradle-profiler
+  # defaults to <project>/gradle-user-home and does not honor $GRADLE_USER_HOME
+  # for the IDE-driven sync (smoke run 34518694398), so cmd_run passes
+  # --gradle-user-home explicitly and the project-dir copy is the fallback.
+  mkdir -p "$GUH/init.d" "$WS/gradle-user-home/init.d"
   {
     echo "org.gradle.internal.operations.jfr=true"
     echo "systemProp.jfr.measure.marker=$MARKER"
@@ -64,6 +68,8 @@ cmd_setup() {
     echo "systemProp.jfr.measure.heap.period.seconds=$PERIOD"
   } > "$GUH/gradle.properties"
   cp "$INIT_SCRIPT" "$GUH/init.d/jfr-measure.init.gradle"
+  cp "$INIT_SCRIPT" "$WS/gradle-user-home/init.d/jfr-measure.init.gradle"
+  cat "$GUH/gradle.properties" >> gradle.properties
 
   sed "s|@HEAP_DUMP_DIR@|$WS/heap-dumps|" sync.scenarios > sync.scenarios.ci
 
@@ -104,6 +110,7 @@ cmd_run() {
     --project-dir . \
     --scenario-file sync.scenarios.ci \
     --studio-install-dir "$STUDIO_DIR" \
+    --gradle-user-home "$GUH" \
     --output-dir results \
     > profiler.log 2>&1 &
   PROF=$!
@@ -121,6 +128,10 @@ cmd_run() {
       fi
       if dump_complete "$f"; then
         echo "watchdog: complete dump detected ($f, $(stat -c%s "$f") bytes) — terminating the run"
+        # The first flush (at dump detection) usually fails: the attach blocks
+        # while the JVM is stopped writing the dump. Retry now that it finished —
+        # the daemon often lingers after an OOM dump, so this can still succeed.
+        flush_jfr
         break
       fi
     elif [ $SECONDS -ge $local_kill_after ]; then
