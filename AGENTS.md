@@ -75,11 +75,11 @@ modules.
   reclaim ~0.1%. `thrash_watchdog=false` + `publish_dumps=false` = cheap ground-truth
   runs. Never parse `8379M(9216M` with `awk -F'[M(]'` — consecutive separators leave
   `$2` empty and any occupancy test becomes always-true.
-- Runner-image drift moves the OOM threshold between identical SHAs: candidate synced
-  at 8g on image 20260816.277, OOMs at 8g on 20260831.293 (6/6 runs, real dumps;
-  JDK build exonerated via `jdk_version` pin). As of Sep 2026: **candidate fits at 9g,
-  base (upstream) grinds forever at 9g and OOMs at <=8g** — 9g is the A/B operating
-  point. Re-baseline after image bumps.
+- OOM is non-deterministic at a fixed heap: under high concurrency,
+  heavily-allocating threads may or may not pile up at the same moment — the
+  same SHA can fit or OOM at the same `-Xmx`. As of Sep 2026: **candidate fits
+  at 9g, base (upstream) grinds forever at 9g and OOMs at <=8g** — 9g is the
+  A/B operating point.
 - Runner is 16 GB: daemon `-Xmx` must be low enough that the *JVM* throws OOM before
   the kernel OOM-killer (kernel kills write no dump; signature is exit 143 with all
   `if: always()` steps skipped). For 9.8.0-era Gradle with 4g IDE heap: **9g works,
