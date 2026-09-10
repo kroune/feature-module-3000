@@ -1,0 +1,144 @@
+// jfr-measure.init.gradle — daemon-side instrumentation for measure-jfr.yml.
+//
+// Dropped into $GRADLE_USER_HOME/init.d/ by tools/jfr/measure.sh (setup), so it
+// applies to every build in the daemon JVM, including the TAPI sync launched by
+// Android Studio. Two jobs:
+//
+//   1. Sampler thread: emits a custom JFR event `org.gradle.measure.HeapUsage`
+//      every jfr.measure.heap.period.seconds (default 2s) with used/committed
+//      heap, metaspace, class and thread counts. This is the dense memory graph
+//      — jdk.GCHeapSummary only records at GC points, which can be minutes
+//      apart on a 9g heap, hiding allocation spikes between GCs.
+//   2. Marker consumer (only when system property jfr.measure.marker is set):
+//      streams `org.gradle.internal.operations.BuildOperation` events from the
+//      daemon's own JFR repository (jdk.jfr.consumer.EventStream, in-process)
+//      and, right after the Nth operation whose displayName matches the regex
+//      completes, dumps the heap via HotSpotDiagnosticMXBean.
+//
+// All configuration arrives as JVM system properties (systemProp.jfr.measure.*
+// in $GRADLE_USER_HOME/gradle.properties — see measure.sh). Everything is
+// wrapped so a failure here can never break the sync itself.
+//
+// Requires Gradle >= 9.7.0 (BuildOperationJfrEmitter) and JDK 16+ (EventStream);
+// the CI daemon runs JDK 25.
+
+import com.sun.management.HotSpotDiagnosticMXBean
+import jdk.jfr.Category
+import jdk.jfr.DataAmount
+import jdk.jfr.Event
+import jdk.jfr.Label
+import jdk.jfr.Name
+import jdk.jfr.StackTrace
+import jdk.jfr.consumer.EventStream
+
+import java.lang.management.ManagementFactory
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.regex.Pattern
+
+@Name("org.gradle.measure.HeapUsage")
+@Label("Heap Usage (periodic)")
+@Category("Measure")
+@StackTrace(false)
+class MeasureHeapUsageEvent extends Event {
+    @Label("Heap Used") @DataAmount long heapUsed
+    @Label("Heap Committed") @DataAmount long heapCommitted
+    @Label("Heap Max") @DataAmount long heapMax
+    @Label("Metaspace Used") @DataAmount long metaspaceUsed
+    @Label("Loaded Classes") long loadedClasses
+    @Label("Live Threads") long threadCount
+}
+
+@Name("org.gradle.measure.MarkerDump")
+@Label("Marker Heap Dump")
+@Category("Measure")
+@StackTrace(false)
+class MeasureMarkerDumpEvent extends Event {
+    @Label("Matched Operation") String matchedOperation
+    @Label("Dump File") String dumpFile
+}
+
+try {
+    // Init scripts are evaluated once per build (including the build-logic
+    // included build) inside the same daemon JVM — start the threads only once.
+    if (System.getProperty("jfr.measure.started") != null) {
+        return
+    }
+    System.setProperty("jfr.measure.started", "1")
+
+    def prop = { String k, String d -> System.getProperty("jfr.measure." + k, d) }
+
+    long periodSec = prop("heap.period.seconds", "2") as long
+    String marker = prop("marker", "").trim()
+    long occurrence = prop("marker.occurrence", "1") as long
+    String dumpDir = prop("dump.dir", System.getProperty("java.io.tmpdir"))
+    boolean liveOnly = Boolean.parseBoolean(prop("dump.live", "false"))
+
+    println("[jfr-measure] starting: heap sampler every ${periodSec}s" +
+            (marker ? ", marker=/$marker/ occurrence=$occurrence dumpDir=$dumpDir liveOnly=$liveOnly" : ", no marker (measurement only)"))
+
+    Thread sampler = new Thread({
+        def mem = ManagementFactory.memoryMXBean
+        long heapMax = mem.heapMemoryUsage.max
+        def metaspace = { ->
+            ManagementFactory.memoryPoolMXBeans.find { it.name == "Metaspace" }?.usage?.used ?: 0L
+        }
+        while (true) {
+            try {
+                def h = mem.heapMemoryUsage
+                def e = new MeasureHeapUsageEvent()
+                e.heapUsed = h.used
+                e.heapCommitted = h.committed
+                e.heapMax = heapMax
+                e.metaspaceUsed = metaspace()
+                e.loadedClasses = ManagementFactory.classLoadingMXBean.loadedClassCount
+                e.threadCount = ManagementFactory.threadMXBean.threadCount
+                e.commit()
+            } catch (Throwable t) {
+                println("[jfr-measure] sampler error: $t")
+            }
+            Thread.sleep(periodSec * 1000L)
+        }
+    }, "jfr-measure-sampler")
+    sampler.daemon = true
+    sampler.start()
+
+    if (marker) {
+        Pattern pattern = Pattern.compile(marker)
+        AtomicInteger matched = new AtomicInteger(0)
+        HotSpotDiagnosticMXBean hotspot = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean)
+
+        EventStream es = EventStream.openRepository()
+        es.onEvent("org.gradle.internal.operations.BuildOperation") { ev ->
+            try {
+                String dn = ev.getString("displayName")
+                if (dn == null || !pattern.matcher(dn).find()) {
+                    return
+                }
+                int n = matched.incrementAndGet()
+                if (n != occurrence) {
+                    return
+                }
+                String safe = dn.replaceAll(/[^a-zA-Z0-9._-]/, "_")
+                if (safe.length() > 80) {
+                    safe = safe.substring(0, 80)
+                }
+                File f = new File(dumpDir, "marker-${safe}-${System.currentTimeMillis()}.hprof")
+                println("[jfr-measure] marker matched (#$n): '$dn' — dumping heap to $f (liveOnly=$liveOnly)")
+                hotspot.dumpHeap(f.absolutePath, liveOnly)
+                def done = new MeasureMarkerDumpEvent()
+                done.matchedOperation = dn
+                done.dumpFile = f.absolutePath
+                done.commit()
+                println("[jfr-measure] heap dump written: $f")
+            } catch (Throwable t) {
+                println("[jfr-measure] marker consumer error: $t")
+            }
+        }
+        es.onError { t -> println("[jfr-measure] stream error: $t") }
+        es.startAsync()
+        // The stream must not be garbage-collected: stash a JVM-global reference.
+        System.getProperties().put("jfr.measure.stream", es)
+    }
+} catch (Throwable t) {
+    println("[jfr-measure] FATAL (instrumentation disabled, sync unaffected): $t")
+}

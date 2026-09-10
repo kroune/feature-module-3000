@@ -34,6 +34,17 @@ modules.
   The Gradle under test is either `gradle_repo`@`gradle_ref` (resolved to the
   `gradle-build-<sha12>` cache, built on demand if missing) or, when `gradle_ref`
   is empty, a direct `gradle_distribution_url`.
+  `measure-jfr.yml` is the memory-first successor to OOM-watching (releases
+  `run-jfr-N`): daemon JFR with Gradle's build-operation events
+  (`org.gradle.internal.operations.jfr=true`, Gradle >= 9.7.0) as markers plus a
+  custom periodic `org.gradle.measure.HeapUsage` event from an in-daemon sampler
+  — the dense memory graph. Setting the `dump_marker` regex input turns the run
+  into a deterministic dump-at-marker: an in-daemon `EventStream` consumer calls
+  `HotSpotDiagnosticMXBean.dumpHeap` right after the Nth matching operation.
+  All orchestration lives in `tools/jfr/` (`measure.sh` setup/run,
+  `jfr-measure.init.gradle`, `render_memory_graph.py`, `publish.sh`); the
+  workflow is thin glue. Flow: measurement run → pick a marker from
+  `markers.csv` in the release → re-dispatch with `dump_marker`.
 
 ## Commands
 

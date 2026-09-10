@@ -1,0 +1,348 @@
+name: measure-jfr
+
+# Memory-first measurement of a single cold Android Studio sync — the successor
+# to waiting for a non-deterministic OOM. The Gradle daemon records JFR from JVM
+# start with THREE event sources:
+#   - org.gradle.internal.operations.BuildOperation (Gradle >= 9.7.0, one event
+#     per build operation — the markers; enabled via org.gradle.internal.operations.jfr)
+#   - org.gradle.measure.HeapUsage — custom event emitted every heap_sample_seconds
+#     by an in-daemon sampler (tools/jfr/jfr-measure.init.gradle) — the dense
+#     memory graph
+#   - JDK events from settings=profile (GCHeapSummary = exact post-GC occupancy)
+# Deliverables (release run-jfr-<run_number>): memory graph (html+csv), full
+# marker list (markers.csv), the .jfr snapshot.
+#
+# Follow-up mode: set dump_marker (regex on BuildOperation displayName) and the
+# daemon dumps its heap right after the Nth matching operation completes —
+# deterministic dumps at a chosen point instead of hoping for an OOM.
+#
+# All orchestration lives in tools/jfr/*.sh — this file is thin glue.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit / branch / tag of THIS repo to measure"
+        default: "main"
+        type: string
+      daemon_xmx:
+        description: "Gradle daemon heap, -Xmx = -Xms (9g fits; 2g smoke run will OOM)"
+        default: "9g"
+        type: string
+      kill_after_hours:
+        description: "Flush JFR and terminate after this many hours (runner cap is 6h)"
+        default: "5"
+        type: string
+      dump_marker:
+        description: "Regex matched against BuildOperation displayName (see markers.csv from a measurement run). Empty = measurement only; set = daemon heap-dumps after the matching operation completes"
+        default: ""
+        type: string
+      dump_marker_occurrence:
+        description: "Trigger the dump on the Nth match of dump_marker (per-module operations repeat)"
+        default: "1"
+        type: string
+      dump_live:
+        description: "true = live-objects-only dump (full GC first, smaller dump); false = full heap"
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      heap_sample_seconds:
+        description: "Period of the org.gradle.measure.HeapUsage event (memory graph resolution)"
+        default: "2"
+        type: string
+      gradle_repo:
+        description: "GitHub repo (owner/name) to resolve gradle_ref in"
+        default: "kroune/gradle-fork"
+        type: string
+      gradle_ref:
+        description: "Gradle commit SHA / branch / tag — resolved to the cached gradle-build-<sha12> release (built on demand if missing). Leave empty to use gradle_distribution_url instead"
+        default: ""
+        type: string
+      gradle_distribution_url:
+        description: "Gradle distribution zip URL — only used when gradle_ref is empty. MUST be >= 9.7.0 (BuildOperation JFR emitter)"
+        default: "https://services.gradle.org/distributions/gradle-9.7.0-bin.zip"
+        type: string
+      studio_url:
+        description: "Android Studio linux.tar.gz URL (from jb.gg/android-studio-releases-list.json)"
+        default: "https://edgedl.me.gvt1.com/android/studio/ide-zips/2026.1.2.10/android-studio-quail2-linux.tar.gz"
+        type: string
+      gradle_profiler_url:
+        description: "gradle-profiler dist zip URL (patched build; upstream 0.25.2 times out waiting for the IDE plugin)"
+        default: "https://github.com/kroune/feature-module-3000/releases/download/patched-profiler/gradle-profiler-0.25.2.zip"
+        type: string
+
+jobs:
+  # Turns gradle_repo@gradle_ref into a bin-distribution URL via the
+  # gradle-build-<sha12> release cache (tools/gradle_dist.sh — same contract as
+  # measure-commits.yml / profile-sync.yml). When gradle_ref is empty,
+  # gradle_distribution_url is used as-is and the build job below is skipped.
+  dist:
+    runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.dist.outputs.url }}
+      sha: ${{ steps.dist.outputs.sha }}
+      tag: ${{ steps.dist.outputs.tag }}
+      asset: ${{ steps.dist.outputs.asset }}
+      exists: ${{ steps.dist.outputs.exists }}
+      label: ${{ steps.dist.outputs.label }}
+    steps:
+      - uses: actions/checkout@v4 # tools/gradle_dist.sh
+
+      - name: Resolve distribution
+        id: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n '${{ inputs.gradle_ref }}' ]; then
+            sha=$(tools/gradle_dist.sh resolve '${{ inputs.gradle_repo }}' '${{ inputs.gradle_ref }}')
+            echo "resolved ${{ inputs.gradle_repo }}@${{ inputs.gradle_ref }} -> $sha"
+            coords=$(tools/gradle_dist.sh coordinates '${{ github.repository }}' "$sha")
+            echo "$coords" >> "$GITHUB_OUTPUT"
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+            echo "label=${{ inputs.gradle_repo }}@${{ inputs.gradle_ref }} (${sha:0:12})" >> "$GITHUB_OUTPUT"
+            tag=$(echo "$coords" | sed -n 's/^tag=//p')
+            if tools/gradle_dist.sh exists '${{ github.repository }}' "$tag"; then
+              echo "Release $tag already exists — skipping the build."
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Release $tag missing — the build job will create it."
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "url=${{ inputs.gradle_distribution_url }}" >> "$GITHUB_OUTPUT"
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "asset=" >> "$GITHUB_OUTPUT"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "label=${{ inputs.gradle_distribution_url }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Cold Gradle runtime build (~1-2 h); only runs when the resolved commit has no
+  # cached gradle-build-<sha12> release yet. Byte-identical to the build job in
+  # profile-sync.yml, so all workflows share the same release cache.
+  build:
+    needs: dist
+    if: needs.dist.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    permissions:
+      contents: write # publish the distribution release
+    steps:
+      # Gradle's own build requires JDK 25 (see its CONTRIBUTING.md); 17/21 are extra
+      # toolchains in case some module pins an older language level.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            25
+            21
+            17
+
+      - name: Check out Gradle sources
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.gradle_repo }}
+          ref: ${{ needs.dist.outputs.sha }}
+          path: gradle-src
+          fetch-depth: 1
+
+      - name: Build bin distribution
+        working-directory: gradle-src
+        run: |
+          ./gradlew :distributions-full:binDistributionZip --stacktrace \
+            -Dorg.gradle.java.installations.paths="$JAVA_HOME_17_X64,$JAVA_HOME_21_X64,$JAVA_HOME_25_X64"
+
+      - name: Publish distribution as a release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          zip=$(ls gradle-src/packaging/distributions-full/build/distributions/gradle-*-bin.zip)
+          ver=$(basename "$zip" | sed -E 's/^gradle-//; s/-bin\.zip$//')
+          cp "$zip" '${{ needs.dist.outputs.asset }}'
+          {
+            echo "## Gradle bin distribution built"
+            echo
+            echo "- Source: \`${{ inputs.gradle_repo }}@${{ needs.dist.outputs.sha }}\`"
+            echo "- Version: \`$ver\`"
+            echo "- Asset: \`${{ needs.dist.outputs.asset }}\` ($(stat -c%s '${{ needs.dist.outputs.asset }}') bytes)"
+            echo "- Distribution URL: ${{ needs.dist.outputs.url }}"
+          } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
+          gh release delete '${{ needs.dist.outputs.tag }}' --yes -R '${{ github.repository }}' 2>/dev/null || true
+          gh release create '${{ needs.dist.outputs.tag }}' -R '${{ github.repository }}' \
+            --title "Gradle build $ver (${{ inputs.gradle_repo }}@${{ needs.dist.outputs.sha }})" \
+            --notes-file summary.md \
+            '${{ needs.dist.outputs.asset }}'
+
+  measure:
+    needs: [ dist, build ]
+    # runs when build succeeded OR was skipped (cached release already existed)
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    # 6h runner cap; the kill_after_hours watchdog cutoff (default 5h) flushes and
+    # terminates the run well before this fires.
+    timeout-minutes: 360
+    permissions:
+      contents: write # publish result releases
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      # Runner prep: zram keeps the kernel OOM-killer away from the daemon (a JVM
+      # OOM writes a dump; a kernel kill loses all recordings), Android SDK for
+      # the 3000 generated AGP modules.
+      - name: Prepare runner (zram, Android SDK)
+        run: |
+          if sudo modprobe zram; then
+            echo lz4 | sudo tee /sys/block/zram0/comp_algorithm
+            echo 8G | sudo tee /sys/block/zram0/disksize
+            sudo mkswap /dev/zram0 && sudo swapon -p 100 /dev/zram0
+          else
+            echo "zram unavailable, continuing without extra swap"
+          fi
+          free -h; swapon --show
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          command -v sdkmanager >/dev/null && SDKM=sdkmanager
+          yes | "$SDKM" --licenses >/dev/null || true
+          if ! ls -d "$ANDROID_HOME"/platforms/android-37* >/dev/null 2>&1; then
+            "$SDKM" "platforms;android-37.0"
+          fi
+          ls "$ANDROID_HOME/platforms"
+
+      - name: Pin Gradle distribution
+        run: |
+          url='${{ needs.dist.outputs.url }}'
+          esc=$(printf '%s' "$url" | sed 's/[&\\]/\\&/g')
+          sed -i "s|^distributionUrl=.*|distributionUrl=$esc|" gradle/wrapper/gradle-wrapper.properties
+          grep '^distributionUrl' gradle/wrapper/gradle-wrapper.properties
+
+      - name: Install gradle-profiler and Android Studio
+        run: |
+          curl -sL -o gp.zip "${{ inputs.gradle_profiler_url }}"
+          mkdir -p "$RUNNER_TEMP/gp" && unzip -q gp.zip -d "$RUNNER_TEMP/gp" && rm gp.zip
+          GP_BIN=$(find "$RUNNER_TEMP/gp" -type f -name gradle-profiler -path "*/bin/*" | head -1)
+          echo "Found profiler at $GP_BIN"
+          echo "$(dirname "$GP_BIN")" >> "$GITHUB_PATH"
+          "$GP_BIN" --version
+          curl -sL -o studio.tar.gz "${{ inputs.studio_url }}"
+          mkdir -p "$RUNNER_TEMP/studio"
+          tar -xzf studio.tar.gz -C "$RUNNER_TEMP/studio" --strip-components=1
+          rm studio.tar.gz
+          ls "$RUNNER_TEMP/studio/bin"
+          df -h /
+          if ! command -v xvfb-run >/dev/null; then sudo apt-get update && sudo apt-get install -y xvfb; fi
+
+      - name: Configure daemon instrumentation
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/guh
+          DAEMON_XMX: ${{ inputs.daemon_xmx }}
+          DUMP_MARKER: ${{ inputs.dump_marker }}
+          DUMP_MARKER_OCCURRENCE: ${{ inputs.dump_marker_occurrence }}
+          DUMP_LIVE: ${{ inputs.dump_live }}
+          HEAP_SAMPLE_SECONDS: ${{ inputs.heap_sample_seconds }}
+        run: tools/jfr/measure.sh setup
+
+      - name: "Run Android Studio sync (watchdog: JFR flush, dump detection, cutoff)"
+        id: bench
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/guh
+          # Force gradle-profiler to launch the IDE with its headless starter
+          # (full-GUI Studio hangs on project frame creation on CI).
+          GRADLE_PROFILER_OPTS: "-Dide.tests.headless=true"
+          KILL_AFTER_HOURS: ${{ inputs.kill_after_hours }}
+        run: tools/jfr/measure.sh run
+
+      # Parse the JFR snapshot into the memory graph + full marker list.
+      # Best-effort: if the daemon died before any flush, outputs are empty.
+      - name: Render memory graph and marker list
+        if: always()
+        run: |
+          mkdir -p graph
+          python3 tools/jfr/render_memory_graph.py profile/jdk-measure.jfr graph || true
+          ls -lh profile/ graph/ 2>/dev/null || true
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Android Studio sync — JFR memory measurement"
+            echo
+            echo "- Project ref: \`${{ inputs.ref }}\`"
+            echo "- Gradle: \`${{ needs.dist.outputs.label }}\`"
+            echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`)"
+            echo "- HeapUsage period: ${{ inputs.heap_sample_seconds }}s; markers: Gradle BuildOperation JFR events"
+            if [ -n '${{ inputs.dump_marker }}' ]; then
+              echo "- Dump marker: \`${{ inputs.dump_marker }}\` (occurrence ${{ inputs.dump_marker_occurrence }}, live=${{ inputs.dump_live }})"
+              echo "- Dump: \`${{ steps.bench.outputs.dump || 'none' }}\`"
+            else
+              echo "- Mode: measurement only (no dump marker)"
+            fi
+            echo "- gradle-profiler exit code: \`${{ steps.bench.outputs.rc }}\`, timed out: \`${{ steps.bench.outputs.timed_out }}\`"
+            echo "- workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo '```'
+            ls -lh profile/ graph/ 2>/dev/null || echo "no outputs"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: measure-jfr-${{ github.run_number }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            profile/
+            graph/
+            heap-dumps/
+            profiler.log
+            summary.md
+            sync.scenarios.ci
+            gradle.properties
+            gradle/wrapper/gradle-wrapper.properties
+            results/*.csv
+            results/*.html
+            results/**/log/**
+            results/**/logs/**
+
+      # Results go to a release (not just artifacts): release assets have fast,
+      # stable, publicly accessible download URLs — Actions artifact downloads are slow.
+      - name: Publish results as a release
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GRADLE_USER_HOME: ${{ runner.temp }}/guh
+          RELEASE_TAG: run-jfr-${{ github.run_number }}
+          RELEASE_TITLE: JFR measure #${{ github.run_number }} — ${{ needs.dist.outputs.label }}, ref ${{ inputs.ref }}, daemon ${{ inputs.daemon_xmx }}${{ inputs.dump_marker && format(', dump @{0}', inputs.dump_marker) || '' }}
+          REPO: ${{ github.repository }}
+          SUMMARY_MD: summary.md
+        run: |
+          tools/jfr/publish.sh
+          echo "**Results published: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$RELEASE_TAG**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verdict
+        if: always()
+        run: |
+          ok=""
+          for f in profile/*.jfr profile/*.jfr.gz; do
+            if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 102400 ]; then ok="JFR snapshot captured ($f)"; fi
+          done
+          [ -s graph/memory.csv ] && [ "$(wc -l < graph/memory.csv)" -gt 10 ] && ok="$ok; memory graph rendered"
+          if [ -n '${{ inputs.dump_marker }}' ]; then
+            dump=$(ls -S heap-dumps/daemon/*.hprof.gz heap-dumps/daemon/*.hprof 2>/dev/null | head -1)
+            if [ -n "$dump" ] && [ "$(stat -c%s "$dump")" -gt 10485760 ]; then
+              ok="$ok; marker dump captured ($dump)"
+            else
+              echo "FAIL: dump_marker was set but no heap dump was captured."
+              exit 1
+            fi
+          fi
+          if [ -n "$ok" ]; then echo "OK: $ok"; exit 0; fi
+          echo "FAIL: no JFR snapshot and no memory graph captured."
+          exit 1
