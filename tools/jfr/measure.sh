@@ -19,6 +19,9 @@
 #   DUMP_MARKER_OCCURRENCE  Nth match triggers the dump (default: 1)
 #   DUMP_LIVE            true = live-objects-only dump (full GC first) (default: false)
 #   HEAP_SAMPLE_SECONDS  HeapUsage event period (default: 2)
+#   IDE_XMX              Android Studio heap in the scenario (default: 4g — cut
+#                        to 2g when the daemon needs >9g: runner total is 15.6g
+#                        and a healthy 9g sync already peaks at 14.9g used)
 #   KILL_AFTER_HOURS     watchdog cutoff (default: 5)
 #   STUDIO_DIR           Android Studio install dir (default: $RUNNER_TEMP/studio)
 set -euo pipefail
@@ -31,6 +34,7 @@ MARKER="${DUMP_MARKER:-}"
 OCCURRENCE="${DUMP_MARKER_OCCURRENCE:-1}"
 LIVE="${DUMP_LIVE:-false}"
 PERIOD="${HEAP_SAMPLE_SECONDS:-2}"
+IDE_XMX="${IDE_XMX:-4g}"
 KILL_AFTER_HOURS="${KILL_AFTER_HOURS:-5}"
 STUDIO_DIR="${STUDIO_DIR:-$RT/studio}"
 
@@ -72,6 +76,10 @@ cmd_setup() {
   cat "$GUH/gradle.properties" >> gradle.properties
 
   sed "s|@HEAP_DUMP_DIR@|$WS/heap-dumps|" sync.scenarios > sync.scenarios.ci
+  # IDE heap is adjustable only here (other workflows share sync.scenarios with
+  # its hardcoded -Xmx4g): headless CI sync mostly relays TAPI calls, so 2g is
+  # usually enough and frees RAM for a >9g daemon on the 15.6g runner.
+  sed -i "s|\"-Xmx4g\"|\"-Xmx$IDE_XMX\"|" sync.scenarios.ci
 
   echo "== gradle.properties =="; cat gradle.properties
   echo "== GUH gradle.properties =="; cat "$GUH/gradle.properties"

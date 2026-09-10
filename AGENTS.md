@@ -80,10 +80,13 @@ modules.
   same SHA can fit or OOM at the same `-Xmx`. As of Sep 2026: **candidate fits
   at 9g, base (upstream) grinds forever at 9g and OOMs at <=8g** — 9g is the
   A/B operating point.
-- Runner is 16 GB: daemon `-Xmx` must be low enough that the *JVM* throws OOM before
+- Runner is 16 GB (15.6 usable): daemon `-Xmx` must be low enough that the *JVM* throws OOM before
   the kernel OOM-killer (kernel kills write no dump; signature is exit 143 with all
-  `if: always()` steps skipped). For 9.8.0-era Gradle with 4g IDE heap: **9g works,
-  10g loses the race**.
+  `if: always()` steps skipped). JVM heap is not RSS: daemon non-heap adds ~1 GB
+  (metaspace ~0.5g at 74k classes, GC structures, threads), Studio's 4g heap is
+  ~4.5-5g RSS — a healthy 9g sync peaks at **14.9 GB used machine-wide**
+  (run-jfr-6 `jdk.PhysicalMemory`). With 4g IDE: **9g works, 10g loses the
+  race**; for >9g daemon, cut the IDE to 2g (measure-jfr `ide_xmx`).
 - **gradle-profiler ignores `GRADLE_USER_HOME` env for studio-sync** — it defaults to
   `<project>/gradle-user-home` (run 34518694398). Pass `--gradle-user-home` explicitly;
   anything GUH-dependent (init.d scripts, GUH gradle.properties) must also be mirrored

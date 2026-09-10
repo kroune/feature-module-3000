@@ -25,8 +25,12 @@ on:
         default: "main"
         type: string
       daemon_xmx:
-        description: "Gradle daemon heap, -Xmx = -Xms (9g fits; 2g smoke run will OOM)"
+        description: "Gradle daemon heap, -Xmx = -Xms (9g fits; >9g needs ide_xmx=2g — runner is 15.6g total and a healthy 9g sync already peaks at 14.9g used)"
         default: "9g"
+        type: string
+      ide_xmx:
+        description: "Android Studio heap (scenario ide-jvm-args -Xmx). Cut to 2g to make room for a >9g daemon (e.g. making upstream master finish)"
+        default: "4g"
         type: string
       kill_after_hours:
         description: "Flush JFR and terminate after this many hours (runner cap is 6h)"
@@ -199,7 +203,7 @@ jobs:
         run: |
           if sudo modprobe zram; then
             echo lz4 | sudo tee /sys/block/zram0/comp_algorithm
-            echo 8G | sudo tee /sys/block/zram0/disksize
+            echo 16G | sudo tee /sys/block/zram0/disksize
             sudo mkswap /dev/zram0 && sudo swapon -p 100 /dev/zram0
           else
             echo "zram unavailable, continuing without extra swap"
@@ -241,6 +245,7 @@ jobs:
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/guh
           DAEMON_XMX: ${{ inputs.daemon_xmx }}
+          IDE_XMX: ${{ inputs.ide_xmx }}
           DUMP_MARKER: ${{ inputs.dump_marker }}
           DUMP_MARKER_OCCURRENCE: ${{ inputs.dump_marker_occurrence }}
           DUMP_LIVE: ${{ inputs.dump_live }}
@@ -274,7 +279,7 @@ jobs:
             echo
             echo "- Project ref: \`${{ inputs.ref }}\`"
             echo "- Gradle: \`${{ needs.dist.outputs.label }}\`"
-            echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`)"
+            echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`), IDE heap: \`${{ inputs.ide_xmx }}\`"
             echo "- HeapUsage period: ${{ inputs.heap_sample_seconds }}s; markers: Gradle BuildOperation JFR events"
             if [ -n '${{ inputs.dump_marker }}' ]; then
               echo "- Dump marker: \`${{ inputs.dump_marker }}\` (occurrence ${{ inputs.dump_marker_occurrence }}, live=${{ inputs.dump_live }})"
