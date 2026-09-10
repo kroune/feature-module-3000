@@ -12,9 +12,14 @@ Outputs in <outdir>:
   memory.html  standalone report: SVG memory graph + top-50 operation table
 
 Uses the `jfr` CLI (JDK bin) for parsing; stdlib only otherwise.
+`jfr print --json` output for a full 3000-module sync is multi-GB (millions of
+build-operation events) — buffering it killed the 16 GB runner once already
+(run 34522788163). Events are therefore stream-parsed one at a time straight
+from the jfr stdout pipe; memory use stays bounded regardless of recording size.
 """
 import csv
 import json
+import os
 import re
 import subprocess
 import sys
@@ -25,18 +30,67 @@ MEM_EVENTS = "org.gradle.measure.HeapUsage,jdk.GCHeapSummary,jdk.PhysicalMemory"
 MARKER_EVENTS = "org.gradle.internal.operations.BuildOperation,org.gradle.measure.MarkerDump"
 
 
-def jfr_print(jfr_file, events):
-    out = subprocess.run(
-        ["jfr", "print", "--json", "--events", events, jfr_file],
-        capture_output=True, text=True)
-    if out.returncode != 0:
-        print(f"jfr print --events {events} failed: {out.stderr[:2000]}", file=sys.stderr)
-        return []
-    try:
-        return json.loads(out.stdout)["recording"]["events"]
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f"cannot parse jfr JSON for {events}: {e}", file=sys.stderr)
-        return []
+def iter_jfr_events(jfr_file, events):
+    """Yield one parsed event dict at a time from `jfr print --json` stdout.
+
+    The output is {"recording": {"events": [ <obj>, <obj>, ... ]}} — we skip to
+    the array, then cut each top-level object by brace depth (string-aware) and
+    json.loads it individually.
+    """
+    proc = subprocess.Popen(["jfr", "print", "--json", "--events", events, jfr_file],
+                            stdout=subprocess.PIPE, text=True, errors="replace")
+    out = proc.stdout
+    header = ""
+    while '"events"' not in header:
+        c = out.read(1 << 16)
+        if not c:
+            proc.wait()
+            if proc.returncode != 0:
+                print(f"jfr print --events {events} failed (rc={proc.returncode})",
+                      file=sys.stderr)
+            return
+        header += c
+    buf = header[header.find("[") + 1:]
+    depth, in_str, esc, cur = 0, False, False, None
+    while True:
+        if not buf:
+            buf = out.read(1 << 20)
+            if not buf:
+                break
+        i, n = 0, len(buf)
+        while i < n:
+            ch = buf[i]
+            i += 1
+            if cur is not None:
+                cur.append(ch)
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                elif ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            yield json.loads("".join(cur))
+                        except json.JSONDecodeError:
+                            pass
+                        cur = None
+            elif ch == "{":
+                cur = ["{"]
+                depth = 1
+            elif ch == "]":
+                buf = buf[i:]
+                proc.wait()
+                return
+        buf = ""
+    proc.wait()
 
 
 def parse_time(s):
@@ -70,86 +124,112 @@ def to_ms(v):
 def main():
     jfr_file, outdir = sys.argv[1], sys.argv[2]
 
-    mem_events = jfr_print(jfr_file, MEM_EVENTS)
-    marker_events = jfr_print(jfr_file, MARKER_EVENTS)
-
-    t0 = None
-    for ev in mem_events + marker_events:
-        try:
-            t = parse_time(ev["values"]["startTime"])
-            t0 = t if t0 is None or t < t0 else t0
-        except (KeyError, ValueError):
-            pass
-    if t0 is None:
-        t0 = datetime.now(timezone.utc)
-
-    # ---- memory.csv (dense sampler series) ----
+    # ---- memory pass: HeapUsage + GCHeapSummary (few events, kept in RAM) ----
     heap_rows = []
     gc_rows = []
-    for ev in mem_events:
-        v = ev["values"]
-        t = (parse_time(v["startTime"]) - t0).total_seconds()
-        if ev["type"] == "org.gradle.measure.HeapUsage":
-            heap_rows.append((t, to_bytes(v.get("heapUsed")), to_bytes(v.get("heapCommitted")),
+    t0 = None
+    for ev in iter_jfr_events(jfr_file, MEM_EVENTS):
+        v = ev.get("values", {})
+        try:
+            t_abs = parse_time(v["startTime"])
+        except (KeyError, ValueError):
+            continue
+        t0 = t_abs if t0 is None or t_abs < t0 else t0
+        t = 0.0  # recomputed once t0 is known; store abs time meanwhile
+        if ev.get("type") == "org.gradle.measure.HeapUsage":
+            heap_rows.append([t_abs, to_bytes(v.get("heapUsed")), to_bytes(v.get("heapCommitted")),
                               to_bytes(v.get("heapMax")), to_bytes(v.get("metaspaceUsed")),
-                              v.get("loadedClasses", 0), v.get("threadCount", 0)))
-        elif ev["type"] == "jdk.GCHeapSummary":
-            gc_rows.append((t, str(v.get("when", "")), to_bytes(v.get("heapUsed")),
+                              v.get("loadedClasses", 0), v.get("threadCount", 0)])
+        elif ev.get("type") == "jdk.GCHeapSummary":
+            gc_rows.append([t_abs, str(v.get("when", "")), to_bytes(v.get("heapUsed")),
                             to_bytes((v.get("heapSpace") or {}).get("committedSize", 0))
                             if isinstance(v.get("heapSpace"), dict) else to_bytes(v.get("heapSpaceCommitted", 0)),
-                            v.get("gcId", "")))
-    heap_rows.sort()
-    gc_rows.sort()
+                            v.get("gcId", "")])
+    heap_rows.sort(key=lambda r: r[0])
+    gc_rows.sort(key=lambda r: r[0])
+    if t0 is None:
+        t0 = datetime.now(timezone.utc)
 
     with open(f"{outdir}/memory.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["time_s", "heap_used", "heap_committed", "heap_max",
                     "metaspace_used", "loaded_classes", "thread_count"])
-        w.writerows(heap_rows)
+        for r in heap_rows:
+            w.writerow([round((r[0] - t0).total_seconds(), 3)] + r[1:])
     with open(f"{outdir}/gc.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["time_s", "when", "heap_used", "heap_committed", "gc_id"])
-        w.writerows(gc_rows)
+        for r in gc_rows:
+            w.writerow([round((r[0] - t0).total_seconds(), 3)] + r[1:])
 
-    # ---- markers.csv ----
-    ops = []
+    # ---- marker pass: BuildOperation tree, streamed straight to CSV ----------
+    # (millions of rows on a full sync — nothing is accumulated except the
+    # top-50 duration heap for the HTML table and the MarkerDump trigger times)
+    import heapq
+    top50 = []  # min-heap of (duration_ms, idx, row)
+    n_ops = 0
     marker_dumps = []
-    for ev in marker_events:
-        v = ev["values"]
-        t = (parse_time(v["startTime"]) - t0).total_seconds()
-        if ev["type"] == "org.gradle.internal.operations.BuildOperation":
+    seen_gradle_times = False
+    # Events stream in commit order (root "Run build" commits LAST), but
+    # markers.csv must be start-time ordered for region picking. Millions of
+    # rows can't be sorted in RAM safely, so rows are written with a sortable
+    # zero-padded time prefix and sorted externally (sort spills to disk).
+    unsorted = f"{outdir}/markers.unsorted.csv"
+    with open(unsorted, "w", newline="") as f:
+        w = csv.writer(f)
+        for ev in iter_jfr_events(jfr_file, MARKER_EVENTS):
+            v = ev.get("values", {})
+            if ev.get("type") == "org.gradle.measure.MarkerDump":
+                try:
+                    marker_dumps.append(((parse_time(v["startTime"]) - t0).total_seconds(),
+                                         v.get("matchedOperation", ""), v.get("dumpFile", "")))
+                except (KeyError, ValueError):
+                    pass
+                continue
+            if ev.get("type") != "org.gradle.internal.operations.BuildOperation":
+                continue
+            n_ops += 1
             dur_ms = to_ms(v.get("duration", 0))
             if not dur_ms and v.get("gradleEndTime") and v.get("gradleStartTime"):
                 dur_ms = float(v["gradleEndTime"]) - float(v["gradleStartTime"])
-            ops.append({
-                "operationId": v.get("operationId", ""),
-                "parentId": v.get("parentId", ""),
-                "displayName": v.get("displayName", ""),
-                "start_s": round(t, 3),
-                "duration_ms": round(dur_ms, 1),
-                "failureType": v.get("failureType", "") or "",
-            })
-        elif ev["type"] == "org.gradle.measure.MarkerDump":
-            marker_dumps.append((t, v.get("matchedOperation", ""), v.get("dumpFile", "")))
-    ops.sort(key=lambda o: o["start_s"])
+                seen_gradle_times = True
+            try:
+                start_s = (parse_time(v["startTime"]) - t0).total_seconds()
+            except (KeyError, ValueError):
+                continue
+            row = [v.get("operationId", ""), v.get("parentId", ""), v.get("displayName", ""),
+                   round(start_s, 3), round(dur_ms, 1), v.get("failureType", "") or ""]
+            # The prefix column is comma-free, so sort -t, -k1 and cut -f2-
+            # stay correct even when displayName contains quoted commas.
+            w.writerow([f"{start_s:013.3f}"] + row)
+            item = (row[4], n_ops, row)
+            if len(top50) < 50:
+                heapq.heappush(top50, item)
+            elif item[0] > top50[0][0]:
+                heapq.heapreplace(top50, item)
 
-    with open(f"{outdir}/markers.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["operationId", "parentId", "displayName",
-                                          "start_s", "duration_ms", "failureType"])
-        w.writeheader()
-        w.writerows(ops)
+    with open(unsorted) as f_in, open(f"{outdir}/markers.sorted.csv", "w") as f_out:
+        subprocess.run(["sort", "-t,", "-k1,1n", "-s"], stdin=f_in, stdout=f_out)
+    with open(f"{outdir}/markers.sorted.csv") as f_in, \
+            open(f"{outdir}/markers.csv", "w") as f_out:
+        f_out.write("operationId,parentId,displayName,start_s,duration_ms,failureType\n")
+        subprocess.run(["cut", "-d,", "-f2-"], stdin=f_in, stdout=f_out)
+    os.remove(unsorted)
+    os.remove(f"{outdir}/markers.sorted.csv")
 
     # ---- memory.html ----
     w_px, h_px, pad_l, pad_b, pad_t = 1200, 420, 90, 40, 30
     plot_w, plot_h = w_px - pad_l - 20, h_px - pad_t - pad_b
-    t_max = max([r[0] for r in heap_rows] + [r[0] for r in gc_rows] + [1.0])
+    ts = [(r[0] - t0).total_seconds() for r in heap_rows] + \
+         [(r[0] - t0).total_seconds() for r in gc_rows]
+    t_max = max(ts + [1.0])
     y_max = max([r[2] for r in heap_rows] + [r[3] for r in heap_rows] + [1]) * 1.05
 
     def xy(t, val):
         return (pad_l + t / t_max * plot_w, pad_t + plot_h - val / y_max * plot_h)
 
     def polyline(rows, col, color, width=1.5):
-        pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in (xy(r[0], r[col]) for r in rows))
+        pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in (xy((r[0] - t0).total_seconds(), r[col]) for r in rows))
         return f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="{width}"/>'
 
     svg = [f'<svg viewBox="0 0 {w_px} {h_px}" xmlns="http://www.w3.org/2000/svg" '
@@ -166,10 +246,10 @@ def main():
     if heap_rows:
         svg.append(polyline(heap_rows, 2, "#555"))          # committed
         svg.append(polyline(heap_rows, 1, "#4da3ff", 2))    # used
-    gc_after = [r for r in gc_rows if r[1].lower().startswith("after")]
-    for r in gc_after:
-        x, y = xy(r[0], r[2])
-        svg.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.5" fill="#ffb84d"/>')
+    for r in gc_rows:
+        if r[1].lower().startswith("after"):
+            x, y = xy((r[0] - t0).total_seconds(), r[2])
+            svg.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.5" fill="#ffb84d"/>')
     for t, name, _ in marker_dumps:  # marker dump trigger point
         x = xy(t, 0)[0]
         svg.append(f'<line x1="{x:.1f}" y1="{pad_t}" x2="{x:.1f}" y2="{pad_t+plot_h}" stroke="#ff4d4d" stroke-width="2"/>')
@@ -178,18 +258,18 @@ def main():
                f'<text x="{pad_l+210}" y="{pad_t+14}" fill="#ffb84d">&#9679; after-GC live set</text>')
     svg.append('</svg>')
 
-    top = sorted(ops, key=lambda o: -o["duration_ms"])[:50]
     rows_html = "".join(
-        f"<tr><td>{escape(str(o['displayName']))}</td><td>{o['start_s']:.1f}</td>"
-        f"<td>{o['duration_ms']:,.0f}</td><td>{o['operationId']}</td><td>{o['parentId']}</td>"
-        f"<td>{escape(str(o['failureType']))}</td></tr>" for o in top)
+        f"<tr><td>{escape(str(r[2]))}</td><td>{r[3]:.1f}</td>"
+        f"<td>{r[4]:,.0f}</td><td>{r[0]}</td><td>{r[1]}</td>"
+        f"<td>{escape(str(r[5]))}</td></tr>"
+        for _, _, r in sorted(top50, key=lambda x: -x[0]))
 
     html = f"""<!doctype html><meta charset="utf-8"><title>measure-jfr memory graph</title>
 <style>body{{background:#1a1a1a;color:#ddd;font:14px sans-serif;margin:24px}}
 table{{border-collapse:collapse;margin-top:16px}}td,th{{border:1px solid #444;padding:3px 8px}}
 th{{background:#333}}tr:nth-child(even){{background:#222}}</style>
 <h1>Gradle daemon memory — {escape(jfr_file)}</h1>
-<p>{len(heap_rows)} heap samples, {len(gc_rows)} GC summaries, {len(ops)} build operations,
+<p>{len(heap_rows)} heap samples, {len(gc_rows)} GC summaries, {n_ops} build operations,
 {len(marker_dumps)} marker dumps. Full data: memory.csv, gc.csv, markers.csv.</p>
 {''.join(svg)}
 <h2>Top 50 build operations by duration</h2>
@@ -199,7 +279,8 @@ th{{background:#333}}tr:nth-child(even){{background:#222}}</style>
         f.write(html)
 
     print(f"memory.csv: {len(heap_rows)} samples; gc.csv: {len(gc_rows)}; "
-          f"markers.csv: {len(ops)} operations; memory.html written")
+          f"markers.csv: {n_ops} operations; memory.html written"
+          + (" (durations from gradleStartTime/EndTime)" if seen_gradle_times else ""))
 
 
 if __name__ == "__main__":

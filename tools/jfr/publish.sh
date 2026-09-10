@@ -16,14 +16,14 @@ SUMMARY_MD="${SUMMARY_MD:-summary.md}"
 
 # --- compress + evidence -----------------------------------------------------
 for f in profile/*.jfr; do [ -e "$f" ] && gzip -1 "$f" || true; done
-for f in graph/*.jfr; do [ -e "$f" ] && gzip -1 "$f" || true; done
+for f in graph/*.jfr graph/markers.csv; do [ -e "$f" ] && gzip -1 "$f" || true; done
 find heap-dumps -name '*.hprof' -exec gzip -1 {} \; 2>/dev/null || true
 if [ -f "$GUH/gradle.properties" ]; then cp "$GUH/gradle.properties" guh-gradle.properties; fi
 
 # --- asset list --------------------------------------------------------------
 assets=()
 add() { if [ -f "$1" ]; then assets+=("$1"); fi; }
-for f in profile/*.jfr.gz graph/memory.html graph/memory.csv graph/gc.csv graph/markers.csv \
+for f in profile/*.jfr.gz graph/memory.html graph/memory.csv graph/gc.csv graph/markers.csv.gz \
          profiler.log "$SUMMARY_MD" sync.scenarios.ci gradle.properties guh-gradle.properties \
          gradle/wrapper/gradle-wrapper.properties \
          results/benchmark.csv results/benchmark.html results/studio-sandbox/logs/idea.log; do

@@ -88,6 +88,10 @@ modules.
   `<project>/gradle-user-home` (run 34518694398). Pass `--gradle-user-home` explicitly;
   anything GUH-dependent (init.d scripts, GUH gradle.properties) must also be mirrored
   into the project-dir fallback.
+- **Never buffer `jfr print --json` output** — a full 3000-module sync has
+  millions of build-operation events → multi-GB JSON; `capture_output` +
+  `json.loads` OOM-killed the runner (run 34522788163, "step cancelled").
+  Stream-parse one event at a time (tools/jfr/render_memory_graph.py).
 - Upstream gradle-profiler waits only 60 s for the IDE plugin — use the patched build
   from the `patched-profiler` release. On CI the IDE must run headless:
   `GRADLE_PROFILER_OPTS=-Dide.tests.headless=true`.
