@@ -156,6 +156,20 @@ jobs:
             21
             17
 
+      # Rolling cache (restore latest, save a fresh copy under a new key; the
+      # 10 GB repo cap evicts the oldest): dependency jars (modules-2 is
+      # content-addressed), the task-output build cache, and the
+      # wrapper-downloaded Gradle used to build Gradle — all reusable across
+      # different Gradle commits.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/build-cache-1
+            ~/.gradle/wrapper
+          key: gradle-dist-build-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: gradle-dist-build-${{ runner.os }}-
+
       - name: Check out Gradle sources
         uses: actions/checkout@v4
         with:
@@ -263,6 +277,33 @@ jobs:
           ref: ${{ needs.idea-dist.outputs.sha }}
           path: idea-src
           fetch-depth: 1
+
+      # Rolling cache (restore latest, save a fresh copy under a new key; the
+      # 10 GB repo cap evicts the oldest): the Bazel repository cache is
+      # content-addressed and the disk cache reuses action outputs (remote-cache
+      # key scrubbing is already on in .bazelrc), so hits work across different
+      # IntelliJ commits. Also the bazelisk/bazel binaries.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/bazel-cache
+            ~/.cache/JetBrains/monorepo-bazelisk
+            ~/.cache/bazelisk
+          key: bazel-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: bazel-${{ runner.os }}-
+
+      # .bazelrc try-imports %workspace%/../build/remote_cache.bazelrc — the hook
+      # JetBrains CI uses to inject cache config. Point Bazel's repository and
+      # disk caches at the actions/cache-managed dirs (bazelrc does no env
+      # expansion, hence absolute paths).
+      - name: Point Bazel at the persisted caches
+        run: |
+          mkdir -p build /tmp/bazel-cache/repository /tmp/bazel-cache/disk
+          {
+            echo "common --repository_cache=/tmp/bazel-cache/repository"
+            echo "build --disk_cache=/tmp/bazel-cache/disk"
+          } > build/remote_cache.bazelrc
+          cat build/remote_cache.bazelrc
 
       - name: Build Gradle tooling-extension jars
         working-directory: idea-src

@@ -25,6 +25,12 @@ modules.
   `gradle-<sha12>-bin.zip`) is shared through `tools/gradle_dist.sh`
   (`resolve` / `coordinates` / `exists`) — used by both measure-commits.yml and
   profile-sync.yml, never hand-compose those URLs.
+  Build jobs also keep rolling `actions/cache` entries (restore latest, save
+  fresh per run; the 10 GB repo cap evicts the oldest): `bazel-*` — Bazel
+  repository + disk cache for the tooling-extension build, injected through the
+  `.bazelrc` try-import of `%workspace%/../build/remote_cache.bazelrc` (no env
+  expansion in bazelrc — absolute `/tmp/bazel-cache` paths); `gradle-dist-build-*`
+  — `~/.gradle` modules-2 / build-cache-1 / wrapper for the Gradle dist build.
   `profile-sync.yml` profiles a healthy Studio sync of a chosen repo ref (`ref` input,
   releases `run-profile-N-*`): async-profiler (cpu+alloc+wall into one JFR) and JDK JFR
   (`settings=profile`) both start with the daemon via `org.gradle.jvmargs`; the watchdog

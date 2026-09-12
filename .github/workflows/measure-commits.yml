@@ -155,6 +155,21 @@ jobs:
             21
             17
 
+      # Rolling cache (restore latest, save a fresh copy under a new key; the
+      # 10 GB repo cap evicts the oldest): dependency jars (modules-2 is
+      # content-addressed), the task-output build cache, and the
+      # wrapper-downloaded Gradle used to build Gradle — all reusable across
+      # different Gradle commits.
+      - uses: actions/cache@v4
+        if: steps.cached.outputs.exists != 'true'
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/build-cache-1
+            ~/.gradle/wrapper
+          key: gradle-dist-build-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: gradle-dist-build-${{ runner.os }}-
+
       - name: Check out Gradle sources
         if: steps.cached.outputs.exists != 'true'
         uses: actions/checkout@v4
