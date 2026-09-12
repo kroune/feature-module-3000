@@ -75,7 +75,12 @@ modules.
   kills the profiler tree on a size-stable daemon dump or on GC thrash detected in
   `gc-logs/daemon-gc-%p.log` — keep it intact. **JDK 25+ writes dumps in segments**:
   wait while any `*.p[0-9]` file exists, or you kill the daemon mid-dump and publish
-  a header-only file.
+  a header-only file. In measure-jfr, the same race applies to the JFR: after a
+  complete OOM dump, the dying daemon writes its final recording (dumponexit)
+  during shutdown — SIGKILLing it mid-write leaves a truncated, unparseable
+  `.jfr` (run-jfr-14). The watchdog now waits up to 10 min for the daemon to
+  exit on its own, and the Verdict ignores corrupt snapshots
+  (`graph/jfr-corrupt.txt`).
 - Thrash detector (measure-commits.yml, inputs `thrash_*`): two limbs over consecutive
   non-System full GCs — hard (>=97% live OR <2% reclaimed → fire) and slow (>=90% live
   for 10 continuous minutes → fire). Calibrated on captured logs with known outcomes:
