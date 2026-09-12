@@ -140,18 +140,6 @@ cmd_run() {
         # while the JVM is stopped writing the dump. Retry now that it finished —
         # the daemon often lingers after an OOM dump, so this can still succeed.
         flush_jfr
-        # The OOM'd JVM writes its final JFR (dumponexit=true) during shutdown.
-        # SIGKILLing it mid-write leaves a truncated recording (run-jfr-14:
-        # 2 bytes short, unparseable). Give the daemon a grace period to die on
-        # its own — the teardown kills below handle a lingering daemon.
-        for _ in $(seq 1 40); do
-          pid=$(daemon_pid)
-          if [ -z "$pid" ]; then
-            echo "watchdog: OOM'd daemon exited on its own"
-            break
-          fi
-          sleep 15
-        done
         break
       fi
     elif [ $SECONDS -ge $local_kill_after ]; then

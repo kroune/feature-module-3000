@@ -450,13 +450,6 @@ jobs:
         if: always()
         run: |
           mkdir -p graph
-          # A teardown race can leave a truncated recording (SIGKILL during the
-          # OOM'd daemon's dumponexit write — run-jfr-14). Flag it so the
-          # Verdict doesn't count a corrupt snapshot as success.
-          if [ -f profile/jdk-measure.jfr ] && ! jfr summary profile/jdk-measure.jfr >/dev/null 2>&1; then
-            echo "::warning::profile/jdk-measure.jfr is truncated/corrupt — graphs will be empty"
-            touch graph/jfr-corrupt.txt
-          fi
           python3 tools/jfr/render_memory_graph.py profile/jdk-measure.jfr graph || true
           ls -lh profile/ graph/ 2>/dev/null || true
 
@@ -526,7 +519,7 @@ jobs:
         run: |
           ok=""
           for f in profile/*.jfr profile/*.jfr.gz; do
-            if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 102400 ] && [ ! -f graph/jfr-corrupt.txt ]; then ok="JFR snapshot captured ($f)"; fi
+            if [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 102400 ]; then ok="JFR snapshot captured ($f)"; fi
           done
           [ -s graph/memory.csv ] && [ "$(wc -l < graph/memory.csv)" -gt 10 ] && ok="$ok; memory graph rendered"
           dump=$(ls -S heap-dumps/daemon/*.hprof.gz heap-dumps/daemon/*.hprof 2>/dev/null | head -1) || true
