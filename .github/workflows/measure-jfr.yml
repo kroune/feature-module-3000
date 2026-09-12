@@ -16,6 +16,13 @@ name: measure-jfr
 # daemon dumps its heap right after the Nth matching operation completes —
 # deterministic dumps at a chosen point instead of hoping for an OOM.
 #
+# Custom IDE side: set idea_ref (IntelliJ commit/branch) and the Gradle
+# tooling-extension jars are built from those sources (cached as release
+# idea-build-<sha12>, same contract as measure-idea-commits.yml) and overlaid
+# into the Studio installation — the tooling extension runs inside the Gradle
+# daemon during sync, so this swaps the IDE-side resolution implementation.
+# Empty idea_ref = stock Studio from studio_url.
+#
 # All orchestration lives in tools/jfr/*.sh — this file is thin glue.
 on:
   workflow_dispatch:
@@ -68,6 +75,14 @@ on:
       studio_url:
         description: "Android Studio linux.tar.gz URL (from jb.gg/android-studio-releases-list.json)"
         default: "https://edgedl.me.gvt1.com/android/studio/ide-zips/2026.1.2.10/android-studio-quail2-linux.tar.gz"
+        type: string
+      idea_repo:
+        description: "IntelliJ GitHub repo (owner/name) to resolve idea_ref in"
+        default: "kroune/intellij-community"
+        type: string
+      idea_ref:
+        description: "IntelliJ commit SHA / branch / tag — tooling-extension jars are built from it (cached as idea-build-<sha12>) and overlaid into Studio. Leave empty for the stock Studio"
+        default: ""
         type: string
       gradle_profiler_url:
         description: "gradle-profiler dist zip URL (patched build; upstream 0.25.2 times out waiting for the IDE plugin)"
@@ -176,8 +191,114 @@ jobs:
             --notes-file summary.md \
             '${{ needs.dist.outputs.asset }}'
 
+  # Turns idea_repo@idea_ref into a tooling-extension zip URL via the
+  # idea-build-<sha12> release cache (same contract as measure-idea-commits.yml,
+  # so both workflows share the cache). When idea_ref is empty, outputs are
+  # empty with exists=true (stock Studio) and build-idea below is skipped.
+  idea-dist:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.idea.outputs.sha }}
+      tag: ${{ steps.idea.outputs.tag }}
+      asset: ${{ steps.idea.outputs.asset }}
+      url: ${{ steps.idea.outputs.url }}
+      exists: ${{ steps.idea.outputs.exists }}
+      label: ${{ steps.idea.outputs.label }}
+    steps:
+      - name: Resolve IDEA ref
+        id: idea
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z '${{ inputs.idea_ref }}' ]; then
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "asset=" >> "$GITHUB_OUTPUT"
+            echo "url=" >> "$GITHUB_OUTPUT"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "label=stock Studio" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sha=$(gh api 'repos/${{ inputs.idea_repo }}/commits/${{ inputs.idea_ref }}' -q .sha)
+          sha12=$(echo "$sha" | cut -c1-12)
+          tag="idea-build-$sha12"
+          asset="idea-tooling-$sha12.zip"
+          echo "resolved ${{ inputs.idea_repo }}@${{ inputs.idea_ref }} -> $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "url=https://github.com/${{ github.repository }}/releases/download/$tag/$asset" >> "$GITHUB_OUTPUT"
+          echo "label=${{ inputs.idea_repo }}@${{ inputs.idea_ref }} ($sha12)" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" -R '${{ github.repository }}' >/dev/null 2>&1; then
+            echo "Release $tag already exists — skipping the build."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release $tag missing — the build-idea job will create it."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Cold Bazel build of the Gradle tooling-extension jars (toolingExtension-api +
+  # toolingExtension-impl); only runs when idea_ref is set and the resolved commit
+  # has no cached idea-build-<sha12> release yet. Byte-identical to the build-idea
+  # job in measure-idea-commits.yml, so both workflows share the release cache.
+  build-idea:
+    needs: idea-dist
+    if: needs.idea-dist.outputs.exists == 'false'
+    runs-on: ubuntu-latest
+    # A cold Bazel build of the tooling extension (incl. dependency downloads) is slow.
+    timeout-minutes: 240
+    permissions:
+      contents: write # publish the tooling-extension release
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Check out IntelliJ sources
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.idea_repo }}
+          ref: ${{ needs.idea-dist.outputs.sha }}
+          path: idea-src
+          fetch-depth: 1
+
+      - name: Build Gradle tooling-extension jars
+        working-directory: idea-src
+        run: |
+          ./bazel.cmd build \
+            //plugins/gradle/tooling-extension-api:toolingExtension \
+            //plugins/gradle/tooling-extension-impl:toolingExtension-impl
+
+      - name: Publish jars as a release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bin=idea-src/out/bazel-bin
+          [ -d "$bin" ] || bin=idea-src/bazel-bin
+          mkdir -p dist
+          cp "$bin/plugins/gradle/tooling-extension-api/toolingExtension.jar" dist/gradle-tooling-extension-api.jar
+          cp "$bin/plugins/gradle/tooling-extension-impl/toolingExtension-impl.jar" dist/gradle-tooling-extension-impl.jar
+          (cd dist && zip -q "../${{ needs.idea-dist.outputs.asset }}" *.jar)
+          {
+            echo "## IntelliJ Gradle tooling extension built"
+            echo
+            echo "- Source: \`${{ inputs.idea_repo }}@${{ needs.idea-dist.outputs.sha }}\`"
+            echo '- Jars:'
+            ls -l dist | tail -n +2 | sed 's/^/  - /'
+            echo "- Asset: \`${{ needs.idea-dist.outputs.asset }}\`"
+            echo "- URL: ${{ needs.idea-dist.outputs.url }}"
+          } | tee -a "$GITHUB_STEP_SUMMARY" summary.md
+          gh release delete '${{ needs.idea-dist.outputs.tag }}' --yes -R '${{ github.repository }}' 2>/dev/null || true
+          gh release create '${{ needs.idea-dist.outputs.tag }}' -R '${{ github.repository }}' \
+            --title "IDEA tooling extension (${{ inputs.idea_repo }}@$(echo '${{ needs.idea-dist.outputs.sha }}' | cut -c1-12))" \
+            --notes-file summary.md \
+            '${{ needs.idea-dist.outputs.asset }}'
+
   measure:
-    needs: [ dist, build ]
+    needs: [ dist, build, idea-dist, build-idea ]
     # runs when build succeeded OR was skipped (cached release already existed)
     if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
@@ -241,6 +362,26 @@ jobs:
           df -h /
           if ! command -v xvfb-run >/dev/null; then sudo apt-get update && sudo apt-get install -y xvfb; fi
 
+      # The tooling extension runs inside the Gradle daemon during sync; replacing
+      # these two jars is enough to swap the IDE-side dependency resolution
+      # implementation (same overlay as measure-idea-commits.yml).
+      - name: Overlay tooling-extension jars into Studio
+        if: inputs.idea_ref != ''
+        run: |
+          set -euo pipefail
+          curl -sL -o tooling.zip '${{ needs.idea-dist.outputs.url }}'
+          mkdir -p "$RUNNER_TEMP/tooling" && unzip -q tooling.zip -d "$RUNNER_TEMP/tooling" && rm tooling.zip
+          ls -l "$RUNNER_TEMP/tooling"
+          for name in gradle-tooling-extension-api gradle-tooling-extension-impl; do
+            target=$(find "$RUNNER_TEMP/studio/plugins" -name "$name.jar" | head -1)
+            if [ -z "$target" ]; then
+              echo "ERROR: $name.jar not found in the Studio installation" >&2
+              exit 1
+            fi
+            echo "replacing $target"
+            cp "$RUNNER_TEMP/tooling/$name.jar" "$target"
+          done
+
       - name: Configure daemon instrumentation
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/guh
@@ -279,6 +420,7 @@ jobs:
             echo
             echo "- Project ref: \`${{ inputs.ref }}\`"
             echo "- Gradle: \`${{ needs.dist.outputs.label }}\`"
+            echo "- IDE: \`${{ needs.idea-dist.outputs.label }}\` (Studio: \`${{ inputs.studio_url }}\`)"
             echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`), IDE heap: \`${{ inputs.ide_xmx }}\`"
             echo "- HeapUsage period: ${{ inputs.heap_sample_seconds }}s; markers: Gradle BuildOperation JFR events"
             if [ -n '${{ inputs.dump_marker }}' ]; then
@@ -324,7 +466,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GRADLE_USER_HOME: ${{ runner.temp }}/guh
           RELEASE_TAG: run-jfr-${{ github.run_number }}
-          RELEASE_TITLE: JFR measure #${{ github.run_number }} — ${{ needs.dist.outputs.label }}, ref ${{ inputs.ref }}, daemon ${{ inputs.daemon_xmx }}${{ inputs.dump_marker && format(', dump @{0}', inputs.dump_marker) || '' }}
+          RELEASE_TITLE: JFR measure #${{ github.run_number }} — ${{ needs.dist.outputs.label }}, IDE ${{ needs.idea-dist.outputs.label }}, ref ${{ inputs.ref }}, daemon ${{ inputs.daemon_xmx }}${{ inputs.dump_marker && format(', dump @{0}', inputs.dump_marker) || '' }}
           REPO: ${{ github.repository }}
           SUMMARY_MD: summary.md
         run: |

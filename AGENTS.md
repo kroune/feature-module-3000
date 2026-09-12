@@ -47,7 +47,10 @@ modules.
   `markers.csv` in the release → re-dispatch with `dump_marker`. Real runs
   always use the 9g default — the point is avoiding OOM, and the Verdict only
   accepts the JFR snapshot / memory graph / marker dump (validated end-to-end
-  by smoke run 34520571109).
+  by smoke run 34520571109). The `idea_repo`/`idea_ref` inputs swap the IDE
+  side: tooling-extension jars are built from that IntelliJ ref via Bazel
+  (cached as `idea-build-<sha12>`, shared with measure-idea-commits.yml) and
+  overlaid into the Studio install; empty `idea_ref` = stock Studio.
 
 ## Commands
 
