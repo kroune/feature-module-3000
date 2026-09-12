@@ -136,8 +136,20 @@ try {
         }
         es.onError { t -> println("[jfr-measure] stream error: $t") }
         es.startAsync()
-        // The stream must not be garbage-collected: stash a JVM-global reference.
-        System.getProperties().put("jfr.measure.stream", es)
+        // The stream must not be garbage-collected: hold it on a live thread's
+        // stack. (System.properties is NOT an option — the configuration cache
+        // serializes properties set during configuration and EventStream's
+        // internals (CountDownLatch) are not serializable.)
+        Thread keeper = new Thread({
+            try {
+                while (es != null) {
+                    Thread.sleep(60000L)
+                }
+            } catch (Throwable ignored) {
+            }
+        }, "jfr-measure-marker-keeper")
+        keeper.daemon = true
+        keeper.start()
     }
 } catch (Throwable t) {
     println("[jfr-measure] FATAL (instrumentation disabled, sync unaffected): $t")
