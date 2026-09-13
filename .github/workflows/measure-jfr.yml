@@ -52,10 +52,10 @@ on:
         default: "1"
         type: string
       dump_live:
-        description: "true = live-objects-only dump (full GC first, smaller dump); false = full heap"
-        default: "false"
+        description: "true = live-objects-only dump (full GC first, smaller dump, no floating garbage); false = full heap"
+        default: "true"
         type: choice
-        options: ["false", "true"]
+        options: ["true", "false"]
       heap_sample_seconds:
         description: "Period of the org.gradle.measure.HeapUsage event (memory graph resolution)"
         default: "2"
@@ -513,6 +513,30 @@ jobs:
         run: |
           tools/jfr/publish.sh
           echo "**Results published: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$RELEASE_TAG**" >> "$GITHUB_STEP_SUMMARY"
+
+      # Kick off MAT index building in the heap-report repo; a no-op when the PAT
+      # secret is absent or no daemon dump was produced (same pattern as the other
+      # measure-* workflows).
+      - name: Trigger MAT index build (heap-report)
+        if: ${{ always() }}
+        env:
+          PAT: ${{ secrets.HEAP_REPORT_PAT }}
+        run: |
+          tag="run-jfr-${{ github.run_number }}"
+          if [ -z "$PAT" ]; then
+            echo "HEAP_REPORT_PAT not set — skipping index-build dispatch"
+            exit 0
+          fi
+          dump=$(ls -S heap-dumps/daemon/*.hprof.gz 2>/dev/null | head -1)
+          if [ -z "$dump" ]; then
+            echo "no daemon dump — skipping index-build dispatch"
+            exit 0
+          fi
+          GH_TOKEN="$PAT" gh api repos/kroune/heap-report/dispatches \
+            -f event_type=build-indexes \
+            -F "client_payload[source_repo]=${{ github.repository }}" \
+            -F "client_payload[release_tag]=$tag"
+          echo "dispatched build-indexes for $tag"
 
       - name: Verdict
         if: always()

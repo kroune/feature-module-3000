@@ -17,7 +17,10 @@
 #   DAEMON_XMX           daemon -Xmx=-Xms (default: 9g)
 #   DUMP_MARKER          regex on BuildOperation displayName; empty = measure only
 #   DUMP_MARKER_OCCURRENCE  Nth match triggers the dump (default: 1)
-#   DUMP_LIVE            true = live-objects-only dump (full GC first) (default: false)
+#   DUMP_LIVE            true = live-objects-only dump (full GC first) (default: true —
+#                        a full-heap dump carries floating garbage that fattens the
+#                        file and skews retained-heap analysis; false only for
+#                        debugging the collector itself)
 #   HEAP_SAMPLE_SECONDS  HeapUsage event period (default: 2)
 #   IDE_XMX              Android Studio heap in the scenario (default: 4g — cut
 #                        to 2g when the daemon needs >9g: runner total is 15.6g
@@ -32,7 +35,7 @@ GUH="${GRADLE_USER_HOME:-$RT/guh}"
 XMX="${DAEMON_XMX:-9g}"
 MARKER="${DUMP_MARKER:-}"
 OCCURRENCE="${DUMP_MARKER_OCCURRENCE:-1}"
-LIVE="${DUMP_LIVE:-false}"
+LIVE="${DUMP_LIVE:-true}"
 PERIOD="${HEAP_SAMPLE_SECONDS:-2}"
 IDE_XMX="${IDE_XMX:-4g}"
 KILL_AFTER_HOURS="${KILL_AFTER_HOURS:-5}"
