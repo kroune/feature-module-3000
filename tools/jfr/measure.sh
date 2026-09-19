@@ -57,6 +57,13 @@ cmd_setup() {
   sed -i "/^kotlin.daemon.jvmargs=/ s|\$| -XX:HeapDumpPath=$WS/heap-dumps/kotlin -XX:HeapDumpGzipLevel=1|" gradle.properties
   sed -i "/^org.gradle.jvmargs=/ s|\$| -XX:StartFlightRecording=name=measure,filename=$WS/profile/jdk-measure.jfr,settings=profile,maxsize=4g,dumponexit=true|" gradle.properties
 
+  # Optional Kotlin DSL script classpath fingerprinting mode (internal option
+  # resolved from gradle.properties; a no-op on Gradle builds without the feature).
+  KSCF="${KOTLIN_SCRIPT_CLASSPATH_FINGERPRINTING:-legacy}"
+  if [ "$KSCF" != "legacy" ]; then
+    echo "org.gradle.internal.kotlin-script-classpath-fingerprinting=$KSCF" >> gradle.properties
+  fi
+
   # Gradle's build-operation JFR emitter (Gradle >= 9.7.0) is an internal option
   # resolved from gradle.properties; the marker/dump knobs reach the daemon as
   # system properties via systemProp.*. Written to BOTH the repo

@@ -57,6 +57,10 @@ modules.
   side: tooling-extension jars are built from that IntelliJ ref via Bazel
   (cached as `idea-build-<sha12>`, shared with measure-idea-commits.yml) and
   overlaid into the Studio install; empty `idea_ref` = stock Studio.
+  The `kotlin_script_classpath_fingerprinting` input (legacy/content/chunked)
+  appends `org.gradle.internal.kotlin-script-classpath-fingerprinting` to
+  gradle.properties in measure.sh setup — selects the script classpath
+  fingerprinting strategy on Gradle builds that have the feature (no-op otherwise).
 
 ## Commands
 

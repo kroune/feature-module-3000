@@ -88,6 +88,11 @@ on:
         description: "gradle-profiler dist zip URL (patched build; upstream 0.25.2 times out waiting for the IDE plugin)"
         default: "https://github.com/kroune/feature-module-3000/releases/download/patched-profiler/gradle-profiler-0.25.2.zip"
         type: string
+      kotlin_script_classpath_fingerprinting:
+        description: "Kotlin DSL script classpath fingerprinting mode (org.gradle.internal.kotlin-script-classpath-fingerprinting). Requires a Gradle build with the feature; legacy = stock behavior"
+        default: "legacy"
+        type: choice
+        options: ["legacy", "content", "chunked"]
 
 jobs:
   # Turns gradle_repo@gradle_ref into a bin-distribution URL via the
@@ -432,6 +437,7 @@ jobs:
           DUMP_MARKER_OCCURRENCE: ${{ inputs.dump_marker_occurrence }}
           DUMP_LIVE: ${{ inputs.dump_live }}
           HEAP_SAMPLE_SECONDS: ${{ inputs.heap_sample_seconds }}
+          KOTLIN_SCRIPT_CLASSPATH_FINGERPRINTING: ${{ inputs.kotlin_script_classpath_fingerprinting }}
         run: tools/jfr/measure.sh setup
 
       - name: "Run Android Studio sync (watchdog: JFR flush, dump detection, cutoff)"
@@ -463,6 +469,7 @@ jobs:
             echo "- Gradle: \`${{ needs.dist.outputs.label }}\`"
             echo "- IDE: \`${{ needs.idea-dist.outputs.label }}\` (Studio: \`${{ inputs.studio_url }}\`)"
             echo "- Daemon heap: \`${{ inputs.daemon_xmx }}\` (JDK 25, \`-XX:+UseCompactObjectHeaders\`), IDE heap: \`${{ inputs.ide_xmx }}\`"
+            echo "- Kotlin script classpath fingerprinting: \`${{ inputs.kotlin_script_classpath_fingerprinting }}\`"
             echo "- HeapUsage period: ${{ inputs.heap_sample_seconds }}s; markers: Gradle BuildOperation JFR events"
             if [ -n '${{ inputs.dump_marker }}' ]; then
               echo "- Dump marker: \`${{ inputs.dump_marker }}\` (occurrence ${{ inputs.dump_marker_occurrence }}, live=${{ inputs.dump_live }})"
@@ -507,7 +514,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GRADLE_USER_HOME: ${{ runner.temp }}/guh
           RELEASE_TAG: run-jfr-${{ github.run_number }}
-          RELEASE_TITLE: JFR measure #${{ github.run_number }} — ${{ needs.dist.outputs.label }}, IDE ${{ needs.idea-dist.outputs.label }}, ref ${{ inputs.ref }}, daemon ${{ inputs.daemon_xmx }}${{ inputs.dump_marker && format(', dump @{0}', inputs.dump_marker) || '' }}
+          RELEASE_TITLE: JFR measure #${{ github.run_number }} — ${{ needs.dist.outputs.label }}, IDE ${{ needs.idea-dist.outputs.label }}, ref ${{ inputs.ref }}, daemon ${{ inputs.daemon_xmx }}, kscpf ${{ inputs.kotlin_script_classpath_fingerprinting }}${{ inputs.dump_marker && format(', dump @{0}', inputs.dump_marker) || '' }}
           REPO: ${{ github.repository }}
           SUMMARY_MD: summary.md
         run: |
