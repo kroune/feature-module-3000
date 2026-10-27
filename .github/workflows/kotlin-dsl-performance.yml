@@ -53,18 +53,21 @@ jobs:
         env:
           BASELINES: ${{ inputs.baselines || '9.0.0,9.8.0' }}
         run: |
-          set -o pipefail
-          ./gradlew \
-            :performance:largeJavaMultiProjectPerformanceAdHocTest \
-            :performance:largeJavaMultiProjectKotlinDslPerformanceAdHocTest \
-            --tests 'org.gradle.performance.regression.java.JavaFirstUsePerformanceTest.first use' \
-            --tests 'org.gradle.performance.regression.inception.BuildSrcApiChangePerformanceTest' \
-            --tests 'org.gradle.performance.regression.java.JavaConfigurationPerformanceTest.configure' \
-            --checks none \
-            -PperformanceBaselines="$BASELINES" \
-            --stacktrace \
-            -Dorg.gradle.java.installations.paths="$JAVA_HOME_17_X64,$JAVA_HOME_21_X64,$JAVA_HOME_25_X64" \
-            2>&1 | tee official-performance.log
+          set -euo pipefail
+          run_scenarios() {
+            ./gradlew "$1" \
+              --tests 'org.gradle.performance.regression.java.JavaFirstUsePerformanceTest.first use' \
+              --tests 'org.gradle.performance.regression.inception.BuildSrcApiChangePerformanceTest' \
+              --tests 'org.gradle.performance.regression.java.JavaConfigurationPerformanceTest.configure' \
+              --checks none \
+              -PperformanceBaselines="$BASELINES" \
+              --stacktrace \
+              -Dorg.gradle.java.installations.paths="$JAVA_HOME_17_X64,$JAVA_HOME_21_X64,$JAVA_HOME_25_X64"
+          }
+          {
+            run_scenarios :performance:largeJavaMultiProjectPerformanceAdHocTest
+            run_scenarios :performance:largeJavaMultiProjectKotlinDslPerformanceAdHocTest
+          } 2>&1 | tee official-performance.log
 
       - name: Record benchmark coordinates
         if: always()
