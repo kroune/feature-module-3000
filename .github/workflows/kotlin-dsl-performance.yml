@@ -61,12 +61,15 @@ jobs:
               --tests 'org.gradle.performance.regression.java.JavaConfigurationPerformanceTest.configure' \
               --checks none \
               -PperformanceBaselines="$BASELINES" \
+              -PtestJavaVersion=21 \
               --stacktrace \
               -Dorg.gradle.java.installations.paths="$JAVA_HOME_17_X64,$JAVA_HOME_21_X64,$JAVA_HOME_25_X64"
           }
           {
-            run_scenarios :performance:largeJavaMultiProjectPerformanceAdHocTest
-            run_scenarios :performance:largeJavaMultiProjectKotlinDslPerformanceAdHocTest
+            status=0
+            run_scenarios :performance:largeJavaMultiProjectPerformanceAdHocTest || status=$?
+            run_scenarios :performance:largeJavaMultiProjectKotlinDslPerformanceAdHocTest || status=$?
+            exit "$status"
           } 2>&1 | tee official-performance.log
 
       - name: Record benchmark coordinates
