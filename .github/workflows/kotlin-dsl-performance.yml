@@ -1,0 +1,131 @@
+name: kotlin-dsl-performance
+
+# Runs Gradle's own Kotlin-versus-Groovy performance scenarios and publishes the
+# complete reports. This workflow intentionally uses the stock iteration counts.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      gradle_ref:
+        description: "Gradle commit, branch, or tag under test"
+        default: "master"
+        type: string
+      baselines:
+        description: "Comma-separated released Gradle baselines"
+        default: "9.0.0,9.8.0"
+        type: string
+      suite:
+        description: "Scenario subset"
+        default: "all"
+        type: choice
+        options:
+          - all
+          - cold-warm
+          - build-src
+
+permissions:
+  contents: read
+
+jobs:
+  official-performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out Gradle under test
+        uses: actions/checkout@v4
+        with:
+          repository: gradle/gradle
+          ref: ${{ inputs.gradle_ref || 'master' }}
+          fetch-depth: 1
+
+      # Gradle's own build requires JDK 25. Older toolchains are made available
+      # to modules and tests that request them explicitly.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            25
+            21
+            17
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/build-cache-1
+            ~/.gradle/wrapper
+          key: kotlin-dsl-performance-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: kotlin-dsl-performance-${{ runner.os }}-
+
+      - name: Run official DSL performance scenarios
+        env:
+          BASELINES: ${{ inputs.baselines || '9.0.0,9.8.0' }}
+          SUITE: ${{ inputs.suite || 'all' }}
+        run: |
+          set -euo pipefail
+          case "$SUITE" in
+            cold-warm)
+              scenario_filters=(
+                --tests 'org.gradle.performance.regression.java.JavaFirstUsePerformanceTest.first use'
+                --tests 'org.gradle.performance.regression.java.JavaConfigurationPerformanceTest.configure'
+              )
+              ;;
+            build-src)
+              scenario_filters=(
+                --tests 'org.gradle.performance.regression.inception.BuildSrcApiChangePerformanceTest.*'
+              )
+              ;;
+            all)
+              scenario_filters=(
+                --tests 'org.gradle.performance.regression.java.JavaFirstUsePerformanceTest.first use'
+                --tests 'org.gradle.performance.regression.inception.BuildSrcApiChangePerformanceTest.*'
+                --tests 'org.gradle.performance.regression.java.JavaConfigurationPerformanceTest.configure'
+              )
+              ;;
+            *)
+              echo "Unknown suite: $SUITE" >&2
+              exit 2
+              ;;
+          esac
+          run_scenarios() {
+            ./gradlew "$1" \
+              "${scenario_filters[@]}" \
+              --checks none \
+              -PperformanceBaselines="$BASELINES" \
+              -PtestJavaVersion=21 \
+              --stacktrace \
+              -Dorg.gradle.java.installations.paths="$JAVA_HOME_17_X64,$JAVA_HOME_21_X64,$JAVA_HOME_25_X64"
+          }
+          {
+            status=0
+            run_scenarios :performance:largeJavaMultiProjectPerformanceAdHocTest || status=$?
+            run_scenarios :performance:largeJavaMultiProjectKotlinDslPerformanceAdHocTest || status=$?
+            exit "$status"
+          } 2>&1 | tee official-performance.log
+
+      - name: Record benchmark coordinates
+        if: always()
+        run: |
+          {
+            echo "## Official Kotlin DSL / Groovy DSL benchmark"
+            echo
+            echo "- Gradle under test: \`${{ inputs.gradle_ref || 'master' }}\`"
+            echo "- Baselines: \`${{ inputs.baselines || '9.0.0,9.8.0' }}\`"
+            echo "- Scenario suite: \`${{ inputs.suite || 'all' }}\`"
+            echo "- Projects: largeJavaMultiProject (Groovy), largeJavaMultiProjectKotlinDsl (Kotlin)"
+            echo "- Result: \`${{ job.status }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish raw performance reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-dsl-performance-${{ github.run_number }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            official-performance.log
+            testing/performance/build/largeJavaMultiProjectPerformanceAdHocTest/
+            testing/performance/build/largeJavaMultiProjectKotlinDslPerformanceAdHocTest/
+            testing/performance/build/test-results/
+            ~/.gradle-performance-test-data/
