@@ -14,6 +14,14 @@ on:
         description: "Comma-separated released Gradle baselines"
         default: "9.0.0,9.8.0"
         type: string
+      suite:
+        description: "Scenario subset"
+        default: "all"
+        type: choice
+        options:
+          - all
+          - cold-warm
+          - build-src
 
 permissions:
   contents: read
@@ -52,13 +60,36 @@ jobs:
       - name: Run official DSL performance scenarios
         env:
           BASELINES: ${{ inputs.baselines || '9.0.0,9.8.0' }}
+          SUITE: ${{ inputs.suite || 'all' }}
         run: |
           set -euo pipefail
+          case "$SUITE" in
+            cold-warm)
+              scenario_filters=(
+                --tests 'org.gradle.performance.regression.java.JavaFirstUsePerformanceTest.first use'
+                --tests 'org.gradle.performance.regression.java.JavaConfigurationPerformanceTest.configure'
+              )
+              ;;
+            build-src)
+              scenario_filters=(
+                --tests 'org.gradle.performance.regression.inception.BuildSrcApiChangePerformanceTest.*'
+              )
+              ;;
+            all)
+              scenario_filters=(
+                --tests 'org.gradle.performance.regression.java.JavaFirstUsePerformanceTest.first use'
+                --tests 'org.gradle.performance.regression.inception.BuildSrcApiChangePerformanceTest.*'
+                --tests 'org.gradle.performance.regression.java.JavaConfigurationPerformanceTest.configure'
+              )
+              ;;
+            *)
+              echo "Unknown suite: $SUITE" >&2
+              exit 2
+              ;;
+          esac
           run_scenarios() {
             ./gradlew "$1" \
-              --tests 'org.gradle.performance.regression.java.JavaFirstUsePerformanceTest.first use' \
-              --tests 'org.gradle.performance.regression.inception.BuildSrcApiChangePerformanceTest' \
-              --tests 'org.gradle.performance.regression.java.JavaConfigurationPerformanceTest.configure' \
+              "${scenario_filters[@]}" \
               --checks none \
               -PperformanceBaselines="$BASELINES" \
               -PtestJavaVersion=21 \
@@ -80,7 +111,7 @@ jobs:
             echo
             echo "- Gradle under test: \`${{ inputs.gradle_ref || 'master' }}\`"
             echo "- Baselines: \`${{ inputs.baselines || '9.0.0,9.8.0' }}\`"
-            echo "- Scenarios: first use, buildSrc ABI change, buildSrc non-ABI change, unchanged configuration"
+            echo "- Scenario suite: \`${{ inputs.suite || 'all' }}\`"
             echo "- Projects: largeJavaMultiProject (Groovy), largeJavaMultiProjectKotlinDsl (Kotlin)"
             echo "- Result: \`${{ job.status }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -96,4 +127,5 @@ jobs:
             official-performance.log
             testing/performance/build/largeJavaMultiProjectPerformanceAdHocTest/
             testing/performance/build/largeJavaMultiProjectKotlinDslPerformanceAdHocTest/
+            testing/performance/build/test-results/
             ~/.gradle-performance-test-data/
